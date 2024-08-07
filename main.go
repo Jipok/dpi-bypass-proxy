@@ -110,11 +110,6 @@ func main() {
 		return
 	}
 
-	// if err := syscall.Setuid(2354); err != nil {
-	// 	fmt.Println("syscall.Setuid error:", err)
-	// 	os.Exit(1)
-	// }
-
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -380,6 +375,7 @@ func readDomains(source string) map[string]bool {
 		domain, _ = strings.CutPrefix(domain, "http-")
 		domain, _ = strings.CutPrefix(domain, "http.")
 		domain, _ = strings.CutPrefix(domain, "0.0.0.0 ")
+		domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
 		if domain != "" {
 			if domain[0] == '#' {
 				continue

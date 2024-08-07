@@ -2,6 +2,8 @@
 
 A Go-based proxy tool that redirects blocked or throttled domains through a user-specified SOCKS5 proxy while allowing direct connections for all other traffic. This tool is designed to work on both Linux PCs and routers.
 
+![image](https://github.com/user-attachments/assets/f772e8a4-f3f2-499f-8c6b-5d7d414b6592)
+
 ## Features
 
 - Redirects blocked or DPI-throttled domains through a SOCKS5 proxy
@@ -12,7 +14,7 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
 ## Usage
 
-1. Download the appropriate binary for your system from the [Releases](https://github.com/yourusername/your-repo-name/releases) page.
+1. Download the appropriate binary for your system from the [Releases](https://github.com/Jipok/dpi-bypass-proxy/releases) page.
 
 2. Run the binary with root privileges:
 
@@ -22,8 +24,8 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
    Available flags:
    - `-socks5`: SOCKS5 proxy address (default: "127.0.0.1:1080")
-   - `-proxyList`: File/URL with list of domains to redirect (default: "https://antifilter.download/list/urls.lst")
-   - `-blockList`: File/URL with list of domains to BLOCK (default: "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts")
+   - `-proxyList`: File/URL with list of domains to redirect (default: [antifilter urls](https://antifilter.download/list/urls.lst))
+   - `-blockList`: File/URL with list of domains to BLOCK (default: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
    - `-v`: Print all dials (verbose mode)
 
 3. The tool will set up iptables rules and start redirecting traffic as configured.
