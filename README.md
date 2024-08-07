@@ -24,7 +24,7 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
    Available flags:
    - `-socks5`: SOCKS5 proxy address (default: "127.0.0.1:1080")
-   - `-proxyList`: File/URL with list of domains to redirect (default: [antifilter urls](https://antifilter.download/list/urls.lst))
+   - `-proxyList`: File/URL with list of domains to redirect (default: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
    - `-blockList`: File/URL with list of domains to BLOCK (default: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
    - `-v`: Print all dials (verbose mode)
 

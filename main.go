@@ -110,6 +110,10 @@ func main() {
 		return
 	}
 
+	if !*verbose {
+		fmt.Println("Silent mode, run with -v for verbose output")
+	}
+
 	go func() {
 		for {
 			conn, err := ln.Accept()
