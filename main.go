@@ -20,8 +20,7 @@ import (
 const UID = 2354
 
 var (
-	mainPort = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	// Этот размер буфера можно настроить для повышения производительности
+	mainPort         = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
 	spliceBufferSize = flag.Int("spliceBufferSize", 16384, "Buffer size for linux splice(2)")
 	socksAddr        = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
 	interfaceName    = flag.String("interface", "", "proxy through interface instead of socks5")
@@ -126,6 +125,10 @@ func main() {
 	log.Printf("Block %d domains\n", counter)
 	runtime.GC()
 
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	log.Printf("Total mem usage: %v MiB\n", m.TotalAlloc/1024/1024)
+
 	ln, err := net.Listen("tcp", ":"+*mainPort)
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", ":"+*mainPort, err)
@@ -142,20 +145,13 @@ func main() {
 	if interfaceAddr == nil {
 		log.Println(green("Proxying will be done via socks5"))
 	} else {
-		log.Printf(green("Proxying will be done via `%s` interface"), *interfaceName)
+		log.Printf(green("Proxying will be done via %s:%s"), *interfaceName, interfaceAddr.IP.String())
 	}
 
 	if !*verbose {
 		fmt.Println("Silent mode, run with -v for verbose output")
 	}
 	fmt.Println("====================")
-
-	// var m runtime.MemStats
-	// runtime.ReadMemStats(&m)
-	// fmt.Printf("Alloc = %v MiB", m.Alloc/1024/1024)
-	// fmt.Printf("\nTotalAlloc = %v MiB", m.TotalAlloc/1024/1024)
-	// fmt.Printf("\nSys = %v MiB", m.Sys/1024/1024)
-	// fmt.Printf("\nNumGC = %v\n", m.NumGC)
 
 	go func() {
 		for {
