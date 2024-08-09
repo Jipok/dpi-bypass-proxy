@@ -30,22 +30,34 @@ var (
 	socksDialer      proxy.Dialer
 )
 
+func red(str string) string {
+	return "\033[31m" + str + "\033[0m"
+}
+
+func green(str string) string {
+	return "\033[32m" + str + "\033[0m"
+}
+
+func yellow(str string) string {
+	return "\033[33m" + str + "\033[0m"
+}
+
 func main() {
 	flag.Parse()
 
 	if !fileExists(*proxyListFile) {
-		fmt.Printf("Error: The proxy list file '%s' does not exist.\n", *proxyListFile)
+		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", *proxyListFile)
 		if *proxyListFile == "proxy.lst" {
 			fmt.Println("To download a sample proxy list, you can use the following command:")
-			fmt.Println("  wget https://antifilter.download/list/domains.lst -O proxy.lst")
+			fmt.Println(green("  wget https://antifilter.download/list/domains.lst -O proxy.lst"))
 		}
 		os.Exit(1)
 	}
 	if !fileExists(*blockListFile) {
-		fmt.Printf("Error: The block list file '%s' does not exist.\n", *blockListFile)
+		fmt.Printf(red("Error:")+" The block list file '%s' does not exist.\n", *blockListFile)
 		if *blockListFile == "blocks.lst" {
 			fmt.Println("To download a sample block list, you can use the following command:")
-			fmt.Println("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst")
+			fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst"))
 		}
 		os.Exit(1)
 	}
@@ -98,7 +110,7 @@ func main() {
 	}
 
 	if os.Getuid() != UID {
-		log.Fatal("Must be run as root")
+		log.Fatal(red("Must be run as root"))
 	}
 	// Код для режима с пониженными привилегиями
 
@@ -130,6 +142,7 @@ func main() {
 	if !*verbose {
 		fmt.Println("Silent mode, run with -v for verbose output")
 	}
+	fmt.Println("====================")
 
 	// var m runtime.MemStats
 	// runtime.ReadMemStats(&m)

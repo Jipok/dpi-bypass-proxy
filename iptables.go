@@ -36,25 +36,25 @@ func setupIPTables() error {
 	nftablesActive := checkRules("nft list ruleset") || fileExists("/proc/net/nf_tables")
 
 	if iptablesAvailable && iptablesActive {
-		fmt.Println("Detected iptables")
+		fmt.Println(green("Detected iptables"))
 	} else if nftablesAvailable && nftablesActive {
-		fmt.Println("Detected nftables")
+		fmt.Println(green("Detected nftables"))
 		useNFT = true
 	} else if iptablesAvailable {
-		fmt.Println("Warning! Detected iptables, but may not be active")
+		fmt.Println(yellow("Warning! Detected iptables, but may not be active"))
 	} else if nftablesAvailable {
-		fmt.Println("Warning! Detected nftables, but may not be active")
+		fmt.Println(yellow("Warning! Detected nftables, but may not be active"))
 	} else {
-		log.Fatal("Neither iptables nor nftables were found.")
+		log.Fatal(red("Neither iptables nor nftables were found."))
 	}
 
 	if useNFT {
-		fmt.Println("You must configure the routing yourself. For router, do:")
+		fmt.Println(yellow("You must configure the routing yourself. For router, do:"))
 		fmt.Printf(`  nft add table ip nat\n`)
 		fmt.Printf(`  nft add chain ip nat prerouting '{ type nat hook prerouting priority -100; }'\n`)
 		fmt.Printf(`  nft add rule ip nat prerouting tcp dport 443 redirect to %s\n`, *mainPort)
 		// fmt.Printf(`  nft add rule ip nat output tcp dport 443 meta skuid != %d redirect to :%s\n`, UID, *mainPort)
-		fmt.Println("Don't forget to delete the rules after closing the program.")
+		fmt.Println(yellow("Don't forget to delete the rules after closing the program."))
 		return nil
 	}
 	command := fmt.Sprintf(`iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port %s`, *mainPort)
@@ -83,7 +83,7 @@ func setupIPTables() error {
 
 func cleanupIPTables() {
 	if useNFT {
-		fmt.Println("Don't forget to delete the nftables rules!")
+		fmt.Println(yellow("Don't forget to delete the nftables rules!"))
 		return
 	}
 	ok := true
