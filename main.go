@@ -1,37 +1,35 @@
 package main
 
 import (
-	"bufio"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
+	"runtime"
 	"syscall"
 
 	"golang.org/x/net/proxy"
+	"golang.org/x/sys/unix"
 )
 
 const UID = 2354
 
+// Этот размер буфера можно настроить для повышения производительности
+const spliceBufferSize = 16384
+
 var (
-	mainPort       = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	socksAddr      = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
-	proxyListFile  = flag.String("proxyList", "https://antifilter.download/list/urls.lst", "File/URL with list of domains to redirect")
-	blockListFile  = flag.String("blockList", "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts", "File/URL with list of domains to BLOCK")
-	verbose        = flag.Bool("v", false, "Print all dials")
-	proxiedDomains map[string]bool
-	blockedDomains map[string]bool
-	NoOUTPUT       = false
-	socksDialer    proxy.Dialer
+	mainPort      = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
+	socksAddr     = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
+	proxyListFile = flag.String("proxyList", "https://antifilter.download/list/urls.lst", "File/URL with list of domains to redirect")
+	blockListFile = flag.String("blockList", "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts", "File/URL with list of domains to BLOCK")
+	verbose       = flag.Bool("v", false, "Print all dials")
+	useNFT        = flag.Bool("nft", false, "Use nft instead iptables")
+	socksDialer   proxy.Dialer
 )
 
 func main() {
@@ -92,10 +90,14 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	proxiedDomains = readDomains(*proxyListFile)
-	log.Printf("Proxies %d domains\n", len(proxiedDomains))
-	blockedDomains = readDomains(*blockListFile)
-	log.Printf("Block %d domains\n", len(blockedDomains))
+	counter := 0
+	proxiedDomains, counter = readDomains(*proxyListFile)
+	log.Printf("Proxies %d domains\n", counter)
+	runtime.GC()
+
+	blockedDomains, counter = readDomains(*blockListFile)
+	log.Printf("Block %d domains\n", counter)
+	runtime.GC()
 
 	ln, err := net.Listen("tcp", ":"+*mainPort)
 	if err != nil {
@@ -113,6 +115,14 @@ func main() {
 	if !*verbose {
 		fmt.Println("Silent mode, run with -v for verbose output")
 	}
+
+	// var m runtime.MemStats
+	// runtime.ReadMemStats(&m)
+	// fmt.Printf("Alloc = %v MiB", m.Alloc / 1024 / 1024)
+	// fmt.Printf("\nTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
+	// fmt.Printf("\nSys = %v MiB", m.Sys / 1024 / 1024)
+	// fmt.Printf("\nNumGC = %v\n", m.NumGC)
+	// os.Exit(0)
 
 	go func() {
 		for {
@@ -145,29 +155,16 @@ func handleConnection(conn *net.TCPConn, socks5Addr string) {
 	// 	return
 	// }
 
-	if blockedDomains[serverName] {
+	_, blocked := blockedDomains[serverName]
+	if blocked {
 		if *verbose {
 			log.Printf("Blocking %s", serverName)
 		}
 		return
 	}
 
-	useSocks := proxiedDomains[serverName]
-
-	socksRequiredDomains := []string{
-		"rutracker",
-		"youtube",
-		"ytimg.com",
-		"gstatic.com",
-		"googleapis.com",
-		"googlevideo.com",
-	}
-	for _, domain := range socksRequiredDomains {
-		if strings.Contains(serverName, domain) {
-			useSocks = true
-			break
-		}
-	}
+	_, proxied := proxiedDomains[serverName]
+	useSocks := proxied || testDomain(serverName)
 
 	originalDst, err := getOriginalDst(conn)
 	if err != nil {
@@ -297,7 +294,7 @@ func getOriginalDst(conn *net.TCPConn) (net.Addr, error) {
 	}, nil
 }
 
-func proxyThroughSocks5(conn net.Conn, originalDst net.Addr, peeked []byte) {
+func proxyThroughSocks5(conn *net.TCPConn, originalDst net.Addr, peeked []byte) {
 	proxyConn, err := socksDialer.Dial(originalDst.Network(), originalDst.String())
 	if err != nil {
 		log.Printf("Failed to dial %s through SOCKS5: %v", originalDst.String(), err)
@@ -312,11 +309,11 @@ func proxyThroughSocks5(conn net.Conn, originalDst net.Addr, peeked []byte) {
 		return
 	}
 
-	pipe(conn, proxyConn)
+	pipe(conn, proxyConn.(*net.TCPConn))
 }
 
-func handleDirectly(conn net.Conn, originalDst net.Addr, peeked []byte) {
-	upstreamConn, err := net.Dial(originalDst.Network(), originalDst.String())
+func handleDirectly(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
+	upstreamConn, err := net.Dial("tcp", originalDst.String())
 	if err != nil {
 		log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
 		return
@@ -330,111 +327,112 @@ func handleDirectly(conn net.Conn, originalDst net.Addr, peeked []byte) {
 		return
 	}
 
-	pipe(conn, upstreamConn)
+	pipe(incomingConn, upstreamConn.(*net.TCPConn))
 }
 
-func pipe(src, dst net.Conn) {
-	go func() {
-		io.Copy(dst, src)
-		dst.Close()
-	}()
-	io.Copy(src, dst)
-	src.Close()
-}
+// func pipe(incomingConn, upstreamConn *net.TCPConn) {
+// 	// Convert to file descriptors
+// 	file1, err := incomingConn.File()
+// 	if err != nil {
+// 		fmt.Fprintf(os.Stderr, "Failed to get file descriptor for conn1: %v\n", err)
+// 		return
+// 	}
+// 	fd1 := int(file1.Fd())
+// 	defer file1.Close()
 
-func readDomains(source string) map[string]bool {
-	var reader io.Reader
-	var closer io.Closer
+// 	file2, err := upstreamConn.File()
+// 	if err != nil {
+// 		fmt.Fprintf(os.Stderr, "Failed to get file descriptor for conn2: %v\n", err)
+// 		return
+// 	}
+// 	fd2 := int(file2.Fd())
+// 	defer file2.Close()
 
-	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		client := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: false,
-				},
-			},
-		}
-		resp, err := client.Get(source)
-		if err != nil {
-			log.Fatal(err)
-		}
-		reader = resp.Body
-		closer = resp.Body
-	} else {
-		file, err := os.Open(source)
-		if err != nil {
-			log.Fatal(err)
-		}
-		reader = file
-		closer = file
+// 	// Выполняем передачу данных в двух направлениях одновременно
+// 	go splice(fd1, fd2)
+// 	splice(fd2, fd1)
+// }
+
+// func pipe(src, dst net.Conn) {
+// 	go func() {
+// 		io.Copy(dst, src)
+// 		dst.Close()
+// 	}()
+// 	io.Copy(src, dst)
+// 	src.Close()
+// }
+
+// func pipe(src, dst net.Conn) {
+// 	go func() {
+// 		buf := bufferPool.Get().([]byte)
+// 		defer bufferPool.Put(buf)
+// 		io.CopyBuffer(dst, src, buf)
+// 		dst.Close()
+// 	}()
+// 	buf := bufferPool.Get().([]byte)
+// 	defer bufferPool.Put(buf)
+// 	io.CopyBuffer(src, dst, buf)
+// 	src.Close()
+// }
+
+// pipe sets up bidirectional data transfer between two TCP connections using splice.
+func pipe(incomingConn, upstreamConn *net.TCPConn) {
+	// Create pipes for splice
+	var pipeFdsIncomingToUpstream [2]int
+	var pipeFdsUpstreamToIncoming [2]int
+	if err := unix.Pipe2(pipeFdsIncomingToUpstream[:], unix.O_NONBLOCK); err != nil {
+		log.Fatalf("failed to create pipe: %v", err)
 	}
-	defer closer.Close()
+	if err := unix.Pipe2(pipeFdsUpstreamToIncoming[:], unix.O_NONBLOCK); err != nil {
+		log.Fatalf("failed to create pipe: %v", err)
+	}
 
-	result := make(map[string]bool)
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		domain := strings.TrimSpace(scanner.Text())
-		domain, _ = strings.CutPrefix(domain, "https-")
-		domain, _ = strings.CutPrefix(domain, "https.")
-		domain, _ = strings.CutPrefix(domain, "http-")
-		domain, _ = strings.CutPrefix(domain, "http.")
-		domain, _ = strings.CutPrefix(domain, "0.0.0.0 ")
-		domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
-		if domain != "" {
-			if domain[0] == '#' {
-				continue
+	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
+		for {
+			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
+			if err != nil {
+				if err == unix.EAGAIN {
+					continue
+				}
+				return err
 			}
-			result[domain] = true
+			if bytes == 0 {
+				return nil
+			}
+
+			for bytes > 0 {
+				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
+				if err != nil {
+					if err == unix.EAGAIN {
+						continue
+					}
+					return err
+				}
+				bytes -= written
+			}
 		}
 	}
 
-	return result
-}
-
-func setupIPTables() error {
-	command := fmt.Sprintf(`iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port %s`, *mainPort)
-	fmt.Printf("Trying run:\n    %s\n", command)
-	output, err := exec.Command("sh", "-c", command).CombinedOutput()
+	srcFdIncoming, err := incomingConn.File()
 	if err != nil {
-		return fmt.Errorf("iptables: %v, output: %s", err, output)
+		log.Printf("failed to get file descriptor for incomingConn: %v", err)
 	}
-
-	command = fmt.Sprintf(`iptables -t nat -A OUTPUT -m owner ! --uid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, UID, *mainPort)
-	fmt.Printf("Trying run:\n    %s\n", command)
-	output, err = exec.Command("sh", "-c", command).CombinedOutput()
+	defer srcFdIncoming.Close()
+	srcFdUpstream, err := upstreamConn.File()
 	if err != nil {
-		str := strings.ToLower(string(output))
-		if strings.Contains(str, "no") && strings.Contains(str, "chain") && strings.Contains(str, "by that name") {
-			fmt.Println("No OUTPUT found in iptables. OK for router")
-			NoOUTPUT = true
-		} else {
-			return fmt.Errorf("iptables: %v, output: %s", err, output)
+		log.Printf("failed to get file descriptor for upstreamConn: %v", err)
+	}
+	defer srcFdUpstream.Close()
+
+	// Transfer data from incomingConn to upstreamConn
+	go func() {
+		if err := transfer(int(srcFdIncoming.Fd()), int(srcFdUpstream.Fd()), pipeFdsIncomingToUpstream); err != nil {
+			log.Printf("error during transfer from incoming to upstream: %v", err)
 		}
-	}
-	log.Println("iptables successfully configured")
-	return nil
-}
+	}()
 
-func cleanupIPTables() {
-	ok := true
-	command := fmt.Sprintf(`iptables -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port %s`, *mainPort)
-	fmt.Printf("Trying run:\n    %s\n", command)
-	output, err := exec.Command("sh", "-c", command).CombinedOutput()
-	if err != nil {
-		fmt.Printf("Can't delete iptables rule: %v, output: %s", err, output)
-		ok = false
-	}
-
-	if !NoOUTPUT {
-		command := fmt.Sprintf(`iptables -t nat -D OUTPUT -m owner ! --uid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, UID, *mainPort)
-		fmt.Printf("Trying run:\n    %s\n", command)
-		output, err = exec.Command("sh", "-c", command).CombinedOutput()
-		if err != nil {
-			fmt.Printf("Can't delete iptables rule: %v, output: %s", err, output)
-			ok = false
-		}
-	}
-	if ok {
-		log.Println("iptables successfully cleaned")
+	// Transfer data from upstreamConn to incomingConn
+	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
+		log.Printf("error during transfer from upstream to incoming: %v", err)
 	}
 }
