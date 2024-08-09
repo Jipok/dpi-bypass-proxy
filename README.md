@@ -6,7 +6,8 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
 ## Features
 
-- Redirects blocked or DPI-throttled domains through a SOCKS5 proxy
+- Redirects blocked or DPI-throttled domains through a proxy
+- Support SOCKS5 proxy or sending though net interface(like wg0)
 - Allows direct connections for non-blocked domains
 - Configurable proxy list and block list
 - Works on Linux PCs and **routers**
@@ -24,7 +25,8 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
    Common flags:
    - `-socks5`: SOCKS5 proxy address (default: "127.0.0.1:1080")
-   - `-proxyList`: File with list of domains to redirect (recommended: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
+   - `-interface`: Network interface to use for proxyList domains, ignores `-socks5`
+   - `-proxyList`: File with list of domains to proxy (recommended: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
    - `-blockList`: File with list of domains to BLOCK (recommended: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
    - `-v`: Print all dials (verbose mode)
 

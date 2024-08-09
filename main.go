@@ -24,10 +24,12 @@ var (
 	// Этот размер буфера можно настроить для повышения производительности
 	spliceBufferSize = flag.Int("spliceBufferSize", 16384, "Buffer size for linux splice(2)")
 	socksAddr        = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
+	interfaceName    = flag.String("interface", "", "proxy through interface instead of socks5")
 	proxyListFile    = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
 	blockListFile    = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
 	verbose          = flag.Bool("v", false, "Print all dials")
 	socksDialer      proxy.Dialer
+	interfaceAddr    *net.TCPAddr
 )
 
 func red(str string) string {
@@ -44,6 +46,8 @@ func yellow(str string) string {
 
 func main() {
 	flag.Parse()
+
+	interfaceAddr = getInterfaceIP(*interfaceName)
 
 	if *proxyListFile == "proxy.lst" && !fileExists(*proxyListFile) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", *proxyListFile)
@@ -135,6 +139,12 @@ func main() {
 		return
 	}
 
+	if interfaceAddr == nil {
+		log.Println(green("Proxying will be done via socks5"))
+	} else {
+		log.Printf(green("Proxying will be done via `%s` interface"), *interfaceName)
+	}
+
 	if !*verbose {
 		fmt.Println("Silent mode, run with -v for verbose output")
 	}
@@ -146,7 +156,6 @@ func main() {
 	// fmt.Printf("\nTotalAlloc = %v MiB", m.TotalAlloc/1024/1024)
 	// fmt.Printf("\nSys = %v MiB", m.Sys/1024/1024)
 	// fmt.Printf("\nNumGC = %v\n", m.NumGC)
-	// os.Exit(0)
 
 	go func() {
 		for {
@@ -203,7 +212,11 @@ func handleConnection(conn *net.TCPConn, socks5Addr string) {
 		if *verbose {
 			log.Printf("Proxying connection to %s", serverName)
 		}
-		proxyThroughSocks5(conn, originalDst, peeked)
+		if interfaceAddr == nil {
+			proxyThroughSocks5(conn, originalDst, peeked)
+		} else {
+			proxyThroughInterface(conn, originalDst, peeked)
+		}
 	} else {
 		if *verbose {
 			log.Printf("Directly connection to %s", serverName)
@@ -296,7 +309,7 @@ func readServerName(conn *net.TCPConn) ([]byte, string, error) {
 	return peeked, "", errors.New("SNI not found in ClientHello")
 }
 
-func getOriginalDst(conn *net.TCPConn) (net.Addr, error) {
+func getOriginalDst(conn *net.TCPConn) (*net.TCPAddr, error) {
 	file, err := conn.File()
 	if err != nil {
 		return nil, err
@@ -318,7 +331,25 @@ func getOriginalDst(conn *net.TCPConn) (net.Addr, error) {
 	}, nil
 }
 
-func proxyThroughSocks5(conn *net.TCPConn, originalDst net.Addr, peeked []byte) {
+func proxyThroughInterface(incomingConn *net.TCPConn, originalDst *net.TCPAddr, peeked []byte) {
+	upstreamConn, err := net.DialTCP(originalDst.Network(), interfaceAddr, originalDst)
+	if err != nil {
+		log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
+		return
+	}
+	defer upstreamConn.Close()
+
+	// Отправляем ранее прочитанные данные
+	_, err = upstreamConn.Write(peeked)
+	if err != nil {
+		log.Printf("Failed to write initial data: %v", err)
+		return
+	}
+
+	pipe(incomingConn, upstreamConn)
+}
+
+func proxyThroughSocks5(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
 	proxyConn, err := socksDialer.Dial(originalDst.Network(), originalDst.String())
 	if err != nil {
 		log.Printf("Failed to dial %s through SOCKS5: %v", originalDst.String(), err)
@@ -333,7 +364,7 @@ func proxyThroughSocks5(conn *net.TCPConn, originalDst net.Addr, peeked []byte) 
 		return
 	}
 
-	pipe(conn, proxyConn.(*net.TCPConn))
+	pipe(incomingConn, proxyConn.(*net.TCPConn))
 }
 
 func handleDirectly(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
@@ -418,4 +449,30 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
 		log.Printf("error during transfer from upstream to incoming: %v", err)
 	}
+}
+
+func getInterfaceIP(interfaceName string) *net.TCPAddr {
+	if interfaceName == "" {
+		return nil
+	}
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return &net.TCPAddr{IP: net.ParseIP(ipnet.IP.String())}
+			}
+		}
+	}
+
+	log.Fatalf(red("Error:")+"no suitable IP address found for `%s`", interfaceName)
+	return nil
 }

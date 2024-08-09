@@ -44,15 +44,16 @@ func setupIPTables() error {
 		fmt.Println(yellow("Warning! Detected iptables, but may not be active"))
 	} else if nftablesAvailable {
 		fmt.Println(yellow("Warning! Detected nftables, but may not be active"))
+		useNFT = true
 	} else {
 		log.Fatal(red("Neither iptables nor nftables were found."))
 	}
 
 	if useNFT {
 		fmt.Println(yellow("You must configure the routing yourself. For router, do:"))
-		fmt.Printf(`  nft add table ip nat\n`)
-		fmt.Printf(`  nft add chain ip nat prerouting '{ type nat hook prerouting priority -100; }'\n`)
-		fmt.Printf(`  nft add rule ip nat prerouting tcp dport 443 redirect to %s\n`, *mainPort)
+		fmt.Println("  nft add table ip nat")
+		fmt.Println("  nft add chain ip nat prerouting '{ type nat hook prerouting priority -100; }'")
+		fmt.Printf("  nft add rule ip nat prerouting tcp dport 443 redirect to %s\n", *mainPort)
 		// fmt.Printf(`  nft add rule ip nat output tcp dport 443 meta skuid != %d redirect to :%s\n`, UID, *mainPort)
 		fmt.Println(yellow("Don't forget to delete the rules after closing the program."))
 		return nil
