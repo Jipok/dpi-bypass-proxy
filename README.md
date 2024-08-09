@@ -44,3 +44,4 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 - Requires root privileges to set up iptables rules
 - After setting up rules, the tool drops privileges to UID 2354
 - Cleans up iptables rules on exit
+- `-proxyList` and `-blockList` accepts a semicolon-separated list of files. Like `proxy.lst; my.txt`

@@ -45,20 +45,16 @@ func yellow(str string) string {
 func main() {
 	flag.Parse()
 
-	if !fileExists(*proxyListFile) {
+	if *proxyListFile == "proxy.lst" && !fileExists(*proxyListFile) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", *proxyListFile)
-		if *proxyListFile == "proxy.lst" {
-			fmt.Println("To download a sample proxy list, you can use the following command:")
-			fmt.Println(green("  wget https://antifilter.download/list/domains.lst -O proxy.lst"))
-		}
+		fmt.Println("To download a sample proxy list, you can use the following command:")
+		fmt.Println(green("  wget https://antifilter.download/list/domains.lst -O proxy.lst"))
 		os.Exit(1)
 	}
-	if !fileExists(*blockListFile) {
+	if *blockListFile == "blocks.lst" && !fileExists(*blockListFile) {
 		fmt.Printf(red("Error:")+" The block list file '%s' does not exist.\n", *blockListFile)
-		if *blockListFile == "blocks.lst" {
-			fmt.Println("To download a sample block list, you can use the following command:")
-			fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst"))
-		}
+		fmt.Println("To download a sample block list, you can use the following command:")
+		fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst"))
 		os.Exit(1)
 	}
 
