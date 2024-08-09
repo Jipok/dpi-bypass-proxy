@@ -19,21 +19,36 @@ import (
 
 const UID = 2354
 
-// Этот размер буфера можно настроить для повышения производительности
-const spliceBufferSize = 16384
-
 var (
-	mainPort      = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	socksAddr     = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
-	proxyListFile = flag.String("proxyList", "https://antifilter.download/list/urls.lst", "File/URL with list of domains to redirect")
-	blockListFile = flag.String("blockList", "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts", "File/URL with list of domains to BLOCK")
-	verbose       = flag.Bool("v", false, "Print all dials")
-	useNFT        = flag.Bool("nft", false, "Use nft instead iptables")
-	socksDialer   proxy.Dialer
+	mainPort = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
+	// Этот размер буфера можно настроить для повышения производительности
+	spliceBufferSize = flag.Int("spliceBufferSize", 16384, "Buffer size for linux splice(2)")
+	socksAddr        = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
+	proxyListFile    = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
+	blockListFile    = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
+	verbose          = flag.Bool("v", false, "Print all dials")
+	socksDialer      proxy.Dialer
 )
 
 func main() {
 	flag.Parse()
+
+	if !fileExists(*proxyListFile) {
+		fmt.Printf("Error: The proxy list file '%s' does not exist.\n", *proxyListFile)
+		if *proxyListFile == "proxy.lst" {
+			fmt.Println("To download a sample proxy list, you can use the following command:")
+			fmt.Println("  wget https://antifilter.download/list/domains.lst -O proxy.lst")
+		}
+		os.Exit(1)
+	}
+	if !fileExists(*blockListFile) {
+		fmt.Printf("Error: The block list file '%s' does not exist.\n", *blockListFile)
+		if *blockListFile == "blocks.lst" {
+			fmt.Println("To download a sample block list, you can use the following command:")
+			fmt.Println("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst")
+		}
+		os.Exit(1)
+	}
 
 	if os.Getuid() == 0 {
 		// Запущено с root-правами
@@ -118,9 +133,9 @@ func main() {
 
 	// var m runtime.MemStats
 	// runtime.ReadMemStats(&m)
-	// fmt.Printf("Alloc = %v MiB", m.Alloc / 1024 / 1024)
-	// fmt.Printf("\nTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
-	// fmt.Printf("\nSys = %v MiB", m.Sys / 1024 / 1024)
+	// fmt.Printf("Alloc = %v MiB", m.Alloc/1024/1024)
+	// fmt.Printf("\nTotalAlloc = %v MiB", m.TotalAlloc/1024/1024)
+	// fmt.Printf("\nSys = %v MiB", m.Sys/1024/1024)
 	// fmt.Printf("\nNumGC = %v\n", m.NumGC)
 	// os.Exit(0)
 
@@ -330,51 +345,6 @@ func handleDirectly(incomingConn *net.TCPConn, originalDst net.Addr, peeked []by
 	pipe(incomingConn, upstreamConn.(*net.TCPConn))
 }
 
-// func pipe(incomingConn, upstreamConn *net.TCPConn) {
-// 	// Convert to file descriptors
-// 	file1, err := incomingConn.File()
-// 	if err != nil {
-// 		fmt.Fprintf(os.Stderr, "Failed to get file descriptor for conn1: %v\n", err)
-// 		return
-// 	}
-// 	fd1 := int(file1.Fd())
-// 	defer file1.Close()
-
-// 	file2, err := upstreamConn.File()
-// 	if err != nil {
-// 		fmt.Fprintf(os.Stderr, "Failed to get file descriptor for conn2: %v\n", err)
-// 		return
-// 	}
-// 	fd2 := int(file2.Fd())
-// 	defer file2.Close()
-
-// 	// Выполняем передачу данных в двух направлениях одновременно
-// 	go splice(fd1, fd2)
-// 	splice(fd2, fd1)
-// }
-
-// func pipe(src, dst net.Conn) {
-// 	go func() {
-// 		io.Copy(dst, src)
-// 		dst.Close()
-// 	}()
-// 	io.Copy(src, dst)
-// 	src.Close()
-// }
-
-// func pipe(src, dst net.Conn) {
-// 	go func() {
-// 		buf := bufferPool.Get().([]byte)
-// 		defer bufferPool.Put(buf)
-// 		io.CopyBuffer(dst, src, buf)
-// 		dst.Close()
-// 	}()
-// 	buf := bufferPool.Get().([]byte)
-// 	defer bufferPool.Put(buf)
-// 	io.CopyBuffer(src, dst, buf)
-// 	src.Close()
-// }
-
 // pipe sets up bidirectional data transfer between two TCP connections using splice.
 func pipe(incomingConn, upstreamConn *net.TCPConn) {
 	// Create pipes for splice
@@ -389,7 +359,7 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 
 	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
 		for {
-			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
+			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
 			if err != nil {
 				if err == unix.EAGAIN {
 					continue
@@ -405,6 +375,10 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 				if err != nil {
 					if err == unix.EAGAIN {
 						continue
+					}
+					// Hide "broken pipe" and "bad file descriptor" spam due to closed connection
+					if err == unix.EPIPE || err == unix.EBADFD {
+						return nil
 					}
 					return err
 				}

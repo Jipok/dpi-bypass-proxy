@@ -22,10 +22,10 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
    sudo ./dpi-bypass-proxy [flags]
    ```
 
-   Available flags:
+   Common flags:
    - `-socks5`: SOCKS5 proxy address (default: "127.0.0.1:1080")
-   - `-proxyList`: File/URL with list of domains to redirect (default: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
-   - `-blockList`: File/URL with list of domains to BLOCK (default: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
+   - `-proxyList`: File with list of domains to redirect (recommended: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
+   - `-blockList`: File with list of domains to BLOCK (recommended: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
    - `-v`: Print all dials (verbose mode)
 
 3. The tool will set up iptables rules and start redirecting traffic as configured.
@@ -37,6 +37,7 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 3. If the domain is in the block list, the connection is dropped.
 4. If the domain is in the proxy list, it's redirected through the SOCKS5 proxy.
 5. All other connections are handled directly.
+6. Data copying is done using linux syscall [splice](https://en.wikipedia.org/wiki/Splice_%28system_call%29).
 
 ## Notes
 

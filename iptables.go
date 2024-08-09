@@ -3,14 +3,52 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
 
-var NoOUTPUT = false
+var (
+	NoOUTPUT = false
+	useNFT   = false
+)
+
+func checkCommand(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
+
+func checkRules(cmd string) bool {
+	output, err := exec.Command("sh", "-c", cmd).Output()
+	return err == nil && len(output) > 0
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
 
 func setupIPTables() error {
-	if *useNFT {
+	iptablesAvailable := checkCommand("iptables")
+	nftablesAvailable := checkCommand("nft")
+
+	iptablesActive := checkRules("iptables -L") || fileExists("/proc/net/ip_tables_names")
+	nftablesActive := checkRules("nft list ruleset") || fileExists("/proc/net/nf_tables")
+
+	if iptablesAvailable && iptablesActive {
+		fmt.Println("Detected iptables")
+	} else if nftablesAvailable && nftablesActive {
+		fmt.Println("Detected nftables")
+		useNFT = true
+	} else if iptablesAvailable {
+		fmt.Println("Warning! Detected iptables, but may not be active")
+	} else if nftablesAvailable {
+		fmt.Println("Warning! Detected nftables, but may not be active")
+	} else {
+		log.Fatal("Neither iptables nor nftables were found.")
+	}
+
+	if useNFT {
 		fmt.Println("You must configure the routing yourself. For router, do:")
 		fmt.Printf(`  nft add table ip nat\n`)
 		fmt.Printf(`  nft add chain ip nat prerouting '{ type nat hook prerouting priority -100; }'\n`)
@@ -44,7 +82,7 @@ func setupIPTables() error {
 }
 
 func cleanupIPTables() {
-	if *useNFT {
+	if useNFT {
 		fmt.Println("Don't forget to delete the nftables rules!")
 		return
 	}

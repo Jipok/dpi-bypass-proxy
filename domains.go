@@ -2,10 +2,8 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 )
@@ -42,28 +40,12 @@ func readDomains(source string) (map[string]struct{}, int) {
 	var reader io.Reader
 	var closer io.Closer
 
-	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		client := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: false,
-				},
-			},
-		}
-		resp, err := client.Get(source)
-		if err != nil {
-			log.Fatal(err)
-		}
-		reader = resp.Body
-		closer = resp.Body
-	} else {
-		file, err := os.Open(source)
-		if err != nil {
-			log.Fatal(err)
-		}
-		reader = file
-		closer = file
+	file, err := os.Open(source)
+	if err != nil {
+		log.Fatal(err)
 	}
+	reader = file
+	closer = file
 	defer closer.Close()
 
 	result := make(map[string]struct{})
