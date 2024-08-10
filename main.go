@@ -20,7 +20,7 @@ const GID = 2354
 
 var (
 	mainPort         = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	spliceBufferSize = flag.Int("spliceBufferSize", 16384, "Buffer size for linux splice(2)")
+	spliceBufferSize = flag.Int("spliceBufferSize", 131072, "Buffer size for linux splice(2)")
 	socksAddr        = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
 	interfaceName    = flag.String("interface", "", "proxy through interface instead of socks5")
 	proxyListFile    = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
@@ -363,6 +363,7 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 			if bytes == 0 {
 				return nil
 			}
+			println(bytes)
 
 			for bytes > 0 {
 				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
@@ -393,16 +394,19 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 	defer srcFdUpstream.Close()
 
 	// Transfer data from incomingConn to upstreamConn
+	done := make(chan struct{})
 	go func() {
 		if err := transfer(int(srcFdIncoming.Fd()), int(srcFdUpstream.Fd()), pipeFdsIncomingToUpstream); err != nil {
 			log.Printf("error during transfer from incoming to upstream: %v", err)
 		}
+		close(done)
 	}()
 
 	// Transfer data from upstreamConn to incomingConn
 	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
 		log.Printf("error during transfer from upstream to incoming: %v", err)
 	}
+	<-done
 }
 
 func getInterfaceIP(interfaceName string) *net.TCPAddr {
