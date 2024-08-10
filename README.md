@@ -11,7 +11,7 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 - Allows direct connections for non-blocked domains
 - Configurable proxy list and block list
 - Works on Linux PCs and **routers**
-- Uses iptables for transparent proxying
+- Uses nftables/iptables for transparent proxying
 
 ## Usage
 
