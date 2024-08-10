@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
 	"syscall"
@@ -17,7 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const UID = 2354
+const GID = 2354
 
 var (
 	mainPort         = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
@@ -46,6 +45,14 @@ func yellow(str string) string {
 func main() {
 	flag.Parse()
 
+	if os.Getuid() != 0 {
+		log.Fatal(red("Must be run as root"))
+	}
+
+	if err := syscall.Setgid(GID); err != nil {
+		log.Fatalf("Can't change GID: %v\n", err)
+	}
+
 	interfaceAddr = getInterfaceIP(*interfaceName)
 
 	if *proxyListFile == "proxy.lst" && !fileExists(*proxyListFile) {
@@ -61,54 +68,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if os.Getuid() == 0 {
-		// Запущено с root-правами
-		configureNetwork()
-
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-		// Перезапуск себя с другим UID
-		cmd := exec.Command(os.Args[0], os.Args[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{Uid: UID, Gid: UID},
-		}
-
-		if err := cmd.Start(); err != nil {
-			log.Fatalf("Failed to start low-privilege process: %v", err)
-		}
-
-		// Горутина для ожидания завершения дочернего процесса
-		done := make(chan error, 1)
-		go func() {
-			done <- cmd.Wait()
-		}()
-
-		// Ожидание сигнала или завершения дочернего процесса
-		select {
-		case sig := <-sigChan:
-			log.Printf("Received signal: %v", sig)
-			// Отправляем сигнал дочернему процессу
-			if err := cmd.Process.Signal(sig); err != nil {
-				log.Printf("Failed to send signal to child process: %v", err)
-			}
-			// Ожидаем завершения дочернего процесса
-			<-done
-		case err := <-done:
-			if err != nil {
-				log.Printf("Low-privilege process exited with error: %v", err)
-			}
-		}
-
-		restoreNetwork()
-		return
-	}
-
-	if os.Getuid() != UID {
-		log.Fatal(red("Must be run as root"))
-	}
+	configureNetwork()
+	defer restoreNetwork()
 	// Код для режима с пониженными привилегиями
 
 	sigChan := make(chan os.Signal, 1)
@@ -151,8 +112,9 @@ func main() {
 	}
 	fmt.Println("====================")
 
+	work := true
 	go func() {
-		for {
+		for work {
 			conn, err := ln.Accept()
 			if err != nil {
 				log.Printf("Failed to accept connection: %v", err)
@@ -171,6 +133,7 @@ func main() {
 	}()
 
 	<-sigChan
+	work = false
 	log.Println("Shutting down...")
 }
 
@@ -226,7 +189,7 @@ func readServerName(conn *net.TCPConn) ([]byte, string, error) {
 
 	// Проверка, что это ClientHello
 	if header[0] != 0x16 || header[1] != 0x03 || header[2] != 0x01 {
-		return header, "", errors.New("not a TLS ClientHello")
+		return header, "", errors.New("not a TLS 1.2 ClientHello")
 	}
 
 	// Получение длины ClientHello
