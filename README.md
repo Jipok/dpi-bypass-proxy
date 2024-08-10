@@ -39,11 +39,41 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 3. If the domain is in the block list, the connection is dropped.
 4. If the domain is in the proxy list, it's redirected through the SOCKS5 proxy.
 5. All other connections are handled directly.
-6. Data copying is done using linux syscall [splice](https://en.wikipedia.org/wiki/Splice_%28system_call%29).
 
-## Notes
 
-- Requires root privileges to set up iptables rules
-- After setting up rules, the tool drops privileges to UID 2354
+- Requires root privileges to set up nf/iptables rules
 - Cleans up iptables rules on exit
+- Data copying is done using linux syscall [splice](https://en.wikipedia.org/wiki/Splice_%28system_call%29).
+- After start the tool sets GID to 2354
 - `-proxyList` and `-blockList` accepts a semicolon-separated list of files. Like `proxy.lst; my.txt`
+
+
+## Wireguard
+By default, when you start Wireguard using the `wg-quick up` command, it configures the system to route all traffic through the Wireguard tunnel. This can interfere with dpi-bypass-proxy's operation, as it won't be able to control which traffic should go through the proxy and which should go directly.
+
+To use dpi-bypass-proxy together with Wireguard:
+
+1. Add the line `Table = off` to the `[Interface]` section of your Wireguard configuration file. For example:
+
+   ```
+   [Interface]
+   PrivateKey = your_private_key
+   Address = 10.0.0.2/24
+   Table = off
+   ```
+
+   This prevents automatic routing of all traffic through Wireguard.
+
+2. Start Wireguard:
+
+   ```
+   sudo wg-quick up wg0
+   ```
+
+3. Now run dpi-bypass-proxy, specifying the Wireguard interface using the `-interface` flag:
+
+   ```
+   sudo ./dpi-bypass-proxy -interface wg0
+   ```
+
+This way, dpi-bypass-proxy will use Wireguard only for domains in the proxy list, while the rest of the traffic will go directly. This allows for more flexible control over which traffic goes through the VPN and which doesn't.

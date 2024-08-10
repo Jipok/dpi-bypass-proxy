@@ -27,7 +27,6 @@ var (
 	blockListFile    = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
 	verbose          = flag.Bool("v", false, "Print all dials")
 	socksDialer      proxy.Dialer
-	interfaceAddr    *net.TCPAddr
 )
 
 func red(str string) string {
@@ -53,8 +52,6 @@ func main() {
 		log.Fatalf("Can't change GID: %v\n", err)
 	}
 
-	interfaceAddr = getInterfaceIP(*interfaceName)
-
 	if *proxyListFile == "proxy.lst" && !fileExists(*proxyListFile) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", *proxyListFile)
 		fmt.Println("To download a sample proxy list, you can use the following command:")
@@ -76,11 +73,11 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	counter := 0
-	proxiedDomains, counter = readDomains(*proxyListFile)
+	proxiedDomains, counter = readDomains(*proxyListFile, true)
 	log.Printf("Proxies %d top-level domains\n", counter)
 	runtime.GC()
 
-	blockedDomains, counter = readDomains(*blockListFile)
+	blockedDomains, counter = readDomains(*blockListFile, false)
 	log.Printf("Block %d domains\n", counter)
 	runtime.GC()
 
@@ -101,10 +98,10 @@ func main() {
 		return
 	}
 
-	if interfaceAddr == nil {
+	if *interfaceName == "" {
 		log.Println(green("Proxying will be done via socks5"))
 	} else {
-		log.Printf(green("Proxying will be done via %s:%s"), *interfaceName, interfaceAddr.IP.String())
+		log.Printf(green("Proxying will be done via: %s"), *interfaceName)
 	}
 
 	if !*verbose {
@@ -166,7 +163,7 @@ func handleConnection(conn *net.TCPConn, socks5Addr string) {
 		if *verbose {
 			log.Printf("Proxying connection to %s", serverName)
 		}
-		if interfaceAddr == nil {
+		if *interfaceName == "" {
 			proxyThroughSocks5(conn, originalDst, peeked)
 		} else {
 			proxyThroughInterface(conn, originalDst, peeked)
@@ -286,12 +283,42 @@ func getOriginalDst(conn *net.TCPConn) (*net.TCPAddr, error) {
 }
 
 func proxyThroughInterface(incomingConn *net.TCPConn, originalDst *net.TCPAddr, peeked []byte) {
-	upstreamConn, err := net.DialTCP(originalDst.Network(), interfaceAddr, originalDst)
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 	if err != nil {
-		log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
+		log.Printf("Failed to create socket: %v", err)
+		return
+	}
+	defer unix.Close(fd)
+
+	if err := unix.BindToDevice(fd, *interfaceName); err != nil {
+		log.Printf("Failed to bind to device %s: %v", *interfaceName, err)
+		return
+	}
+
+	sa := &unix.SockaddrInet4{
+		Port: originalDst.Port,
+	}
+	copy(sa.Addr[:], originalDst.IP.To4())
+
+	if err := unix.Connect(fd, sa); err != nil {
+		log.Printf("Failed to connect: %v", err)
+		return
+	}
+
+	upstreamConn, err := net.FileConn(os.NewFile(uintptr(fd), ""))
+	if err != nil {
+		log.Printf("Failed to create net.Conn from file descriptor: %v", err)
 		return
 	}
 	defer upstreamConn.Close()
+	unix.Close(fd)
+
+	// upstreamConn, err := net.Dial(originalDst.Network(), originalDst.String())
+	// if err != nil {
+	// 	log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
+	// 	return
+	// }
+	// defer upstreamConn.Close()
 
 	// Отправляем ранее прочитанные данные
 	_, err = upstreamConn.Write(peeked)
@@ -300,7 +327,7 @@ func proxyThroughInterface(incomingConn *net.TCPConn, originalDst *net.TCPAddr, 
 		return
 	}
 
-	pipe(incomingConn, upstreamConn)
+	pipe(incomingConn, upstreamConn.(*net.TCPConn))
 }
 
 func proxyThroughSocks5(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
@@ -353,7 +380,7 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 
 	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
 		for {
-			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
+			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK)
 			if err != nil {
 				if err == unix.EAGAIN {
 					continue
@@ -363,7 +390,6 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 			if bytes == 0 {
 				return nil
 			}
-			println(bytes)
 
 			for bytes > 0 {
 				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
@@ -407,30 +433,4 @@ func pipe(incomingConn, upstreamConn *net.TCPConn) {
 		log.Printf("error during transfer from upstream to incoming: %v", err)
 	}
 	<-done
-}
-
-func getInterfaceIP(interfaceName string) *net.TCPAddr {
-	if interfaceName == "" {
-		return nil
-	}
-	iface, err := net.InterfaceByName(interfaceName)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	addrs, err := iface.Addrs()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return &net.TCPAddr{IP: net.ParseIP(ipnet.IP.String())}
-			}
-		}
-	}
-
-	log.Fatalf(red("Error:")+"no suitable IP address found for `%s`", interfaceName)
-	return nil
 }
