@@ -60,15 +60,23 @@ func configureNetwork() {
 
 	fmt.Printf("Trying run:\n")
 	if useNFT {
+		rule := ""
+		if *interfaceName != "" {
+			rule = fmt.Sprintf(`oifname != "%s"`, *interfaceName)
+		}
 		runCommand("nft add table inet dpi-bypass")
-		runCommand("nft add chain inet dpi-bypass prerouting '{ type nat hook prerouting priority -100; }'")
-		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass prerouting tcp dport 443 redirect to %s`, *mainPort))
-		runCommand("nft add chain inet dpi-bypass output '{ type nat hook output priority -100; }'")
-		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass output tcp dport 443 meta skgid != %d redirect to :%s`, GID, *mainPort))
+		runCommand("nft add chain inet dpi-bypass prerouting '{ type nat hook prerouting priority -150; }'")
+		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass prerouting %s tcp dport 443 redirect to %s`, rule, *mainPort))
+		runCommand("nft add chain inet dpi-bypass output '{ type nat hook output priority -150; }'")
+		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass output %s tcp dport 443 meta skgid != %d redirect to :%s`, rule, GID, *mainPort))
 		log.Println(green("nftables successfully configured"))
 	} else {
-		runCommand(fmt.Sprintf(`iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port %s`, *mainPort))
-		command := fmt.Sprintf(`iptables -t nat -A OUTPUT -m owner ! --gid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, GID, *mainPort)
+		rule := ""
+		if *interfaceName != "" {
+			rule = fmt.Sprintf(`! -i %s`, *interfaceName)
+		}
+		runCommand(fmt.Sprintf(`iptables -t nat -A PREROUTING %s -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, *mainPort))
+		command := fmt.Sprintf(`iptables -t nat -A OUTPUT %s -m owner ! --gid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, GID, *mainPort)
 		fmt.Println("  " + command)
 		output, err := exec.Command("sh", "-c", command).CombinedOutput()
 		if err != nil {

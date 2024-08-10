@@ -58,7 +58,7 @@ func testDomain(domain string) bool {
 	return false
 }
 
-func readDomains(sources string) (map[string]struct{}, int) {
+func readDomains(sources string, trim bool) (map[string]struct{}, int) {
 	result := make(map[string]struct{})
 	counter := 0
 
@@ -83,7 +83,9 @@ func readDomains(sources string) (map[string]struct{}, int) {
 			domain, _ = strings.CutPrefix(domain, "http.")
 			domain, _ = strings.CutPrefix(domain, "0.0.0.0 ")
 			domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
-			domain = trimDomain(domain)
+			if trim {
+				domain = trimDomain(domain)
+			}
 			if domain == "" {
 				continue
 			}
