@@ -63,9 +63,7 @@ func main() {
 
 	if os.Getuid() == 0 {
 		// Запущено с root-правами
-		if err := setupIPTables(); err != nil {
-			log.Fatalf("Can't set iptables: %v", err)
-		}
+		configureNetwork()
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -104,7 +102,7 @@ func main() {
 			}
 		}
 
-		cleanupIPTables()
+		restoreNetwork()
 		return
 	}
 
