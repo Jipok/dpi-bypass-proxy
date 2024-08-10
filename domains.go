@@ -12,9 +12,32 @@ var (
 	blockedDomains map[string]struct{}
 )
 
+// a.b.site.com   -> site.com
+// aboba.ru       -> aboba.ru
+// localhost      -> localhost
+// a.test.co.uk   -> test.co.uk
+// a.b.c.test.com -> test.com
+func trimDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+
+	if len(parts) < 3 {
+		return domain
+	}
+	lastTwo := parts[len(parts)-2:]
+
+	// Если предпоследняя часть короче 3 символов (например, "co.uk"), берем три последние части
+	if len(lastTwo[0]) <= 2 {
+		if len(parts) >= 3 {
+			return strings.Join(parts[len(parts)-3:], ".")
+		}
+		return domain
+	}
+
+	return strings.Join(lastTwo, ".")
+}
+
 func testDomain(domain string) bool {
 	socksRequiredDomains := []string{
-		"rutracker",
 		"youtube",
 		"ytimg.com",
 		"gstatic.com",
@@ -60,14 +83,19 @@ func readDomains(sources string) (map[string]struct{}, int) {
 			domain, _ = strings.CutPrefix(domain, "http.")
 			domain, _ = strings.CutPrefix(domain, "0.0.0.0 ")
 			domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
-			if domain != "" {
-				if domain[0] == '#' || testDomain(domain) {
-					continue
-				}
-				if _, exists := result[domain]; !exists {
-					result[domain] = struct{}{}
-					counter++
-				}
+			domain = trimDomain(domain)
+			if domain == "" {
+				continue
+			}
+			if domain[0] == '#' {
+				continue
+			}
+			if testDomain(domain) {
+				continue
+			}
+			if _, exists := result[domain]; !exists {
+				result[domain] = struct{}{}
+				counter++
 			}
 		}
 

@@ -118,7 +118,7 @@ func main() {
 
 	counter := 0
 	proxiedDomains, counter = readDomains(*proxyListFile)
-	log.Printf("Proxies %d domains\n", counter)
+	log.Printf("Proxies %d top-level domains\n", counter)
 	runtime.GC()
 
 	blockedDomains, counter = readDomains(*blockListFile)
@@ -179,10 +179,6 @@ func main() {
 func handleConnection(conn *net.TCPConn, socks5Addr string) {
 	defer conn.Close()
 	peeked, serverName, _ := readServerName(conn)
-	// if err != nil {
-	// 	log.Printf("Failed to read server name: %v", err)
-	// 	return
-	// }
 
 	_, blocked := blockedDomains[serverName]
 	if blocked {
@@ -192,8 +188,9 @@ func handleConnection(conn *net.TCPConn, socks5Addr string) {
 		return
 	}
 
-	_, proxied := proxiedDomains[serverName]
-	useSocks := proxied || testDomain(serverName)
+	domain := trimDomain(serverName)
+	_, proxied := proxiedDomains[domain]
+	useSocks := proxied || testDomain(domain)
 
 	originalDst, err := getOriginalDst(conn)
 	if err != nil {
