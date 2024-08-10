@@ -43,7 +43,6 @@ A Go-based proxy tool that redirects blocked or throttled domains through a user
 
 - Requires root privileges to set up nf/iptables rules
 - Cleans up iptables rules on exit
-- Data copying is done using linux syscall [splice](https://en.wikipedia.org/wiki/Splice_%28system_call%29).
 - After start the tool sets GID to 2354
 - `-proxyList` and `-blockList` accepts a semicolon-separated list of files. Like `proxy.lst; my.txt`
 

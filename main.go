@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 
 	"golang.org/x/net/proxy"
@@ -19,14 +21,14 @@ import (
 const GID = 2354
 
 var (
-	mainPort         = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	spliceBufferSize = flag.Int("spliceBufferSize", 131072, "Buffer size for linux splice(2)")
-	socksAddr        = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
-	interfaceName    = flag.String("interface", "", "proxy through interface instead of socks5")
-	proxyListFile    = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
-	blockListFile    = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
-	verbose          = flag.Bool("v", false, "Print all dials")
-	socksDialer      proxy.Dialer
+	mainPort      = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
+	bufferSize    = flag.Int("bufferSize", 262144, "Buffer size for copying pipe")
+	socksAddr     = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
+	interfaceName = flag.String("interface", "", "proxy through interface instead of socks5")
+	proxyListFile = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
+	blockListFile = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
+	verbose       = flag.Bool("v", false, "Print all dials")
+	socksDialer   proxy.Dialer
 )
 
 func red(str string) string {
@@ -125,7 +127,7 @@ func main() {
 				continue
 			}
 
-			go handleConnection(tcpConn, *socksAddr)
+			go handleConnection(tcpConn)
 		}
 	}()
 
@@ -134,7 +136,7 @@ func main() {
 	log.Println("Shutting down...")
 }
 
-func handleConnection(conn *net.TCPConn, socks5Addr string) {
+func handleConnection(conn *net.TCPConn) {
 	defer conn.Close()
 	peeked, serverName, _ := readServerName(conn)
 
@@ -366,71 +368,114 @@ func handleDirectly(incomingConn *net.TCPConn, originalDst net.Addr, peeked []by
 	pipe(incomingConn, upstreamConn.(*net.TCPConn))
 }
 
-// pipe sets up bidirectional data transfer between two TCP connections using splice.
-func pipe(incomingConn, upstreamConn *net.TCPConn) {
-	// Create pipes for splice
-	var pipeFdsIncomingToUpstream [2]int
-	var pipeFdsUpstreamToIncoming [2]int
-	if err := unix.Pipe2(pipeFdsIncomingToUpstream[:], unix.O_NONBLOCK); err != nil {
-		log.Fatalf("failed to create pipe: %v", err)
-	}
-	if err := unix.Pipe2(pipeFdsUpstreamToIncoming[:], unix.O_NONBLOCK); err != nil {
-		log.Fatalf("failed to create pipe: %v", err)
-	}
-
-	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
-		for {
-			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *spliceBufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK)
-			if err != nil {
-				if err == unix.EAGAIN {
-					continue
-				}
-				return err
-			}
-			if bytes == 0 {
-				return nil
-			}
-
-			for bytes > 0 {
-				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
-				if err != nil {
-					if err == unix.EAGAIN {
-						continue
-					}
-					// Hide "broken pipe" and "bad file descriptor" spam due to closed connection
-					if err == unix.EPIPE || err == unix.EBADFD {
-						return nil
-					}
-					return err
-				}
-				bytes -= written
-			}
-		}
-	}
-
-	srcFdIncoming, err := incomingConn.File()
-	if err != nil {
-		log.Printf("failed to get file descriptor for incomingConn: %v", err)
-	}
-	defer srcFdIncoming.Close()
-	srcFdUpstream, err := upstreamConn.File()
-	if err != nil {
-		log.Printf("failed to get file descriptor for upstreamConn: %v", err)
-	}
-	defer srcFdUpstream.Close()
-
-	// Transfer data from incomingConn to upstreamConn
-	done := make(chan struct{})
-	go func() {
-		if err := transfer(int(srcFdIncoming.Fd()), int(srcFdUpstream.Fd()), pipeFdsIncomingToUpstream); err != nil {
-			log.Printf("error during transfer from incoming to upstream: %v", err)
-		}
-		close(done)
-	}()
-
-	// Transfer data from upstreamConn to incomingConn
-	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
-		log.Printf("error during transfer from upstream to incoming: %v", err)
-	}
-	<-done
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, *bufferSize)
+	},
 }
+
+// Faster that linux splice. Idk why
+func pipe(src, dst net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	copyData := func(writer, reader net.Conn) {
+		defer wg.Done()
+		buffer := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buffer)
+
+		for {
+			n, err := reader.Read(buffer)
+			if err != nil {
+				if err == io.EOF || err == net.ErrClosed {
+					break
+				}
+				log.Printf("Reading error : %v", err)
+				break
+			}
+
+			// Записываем прочитанные данные в writer
+			_, err = writer.Write(buffer[:n])
+			if err == io.EOF || err == net.ErrClosed {
+				break
+			}
+			if err != nil {
+				log.Printf("Writing error: %v", err)
+				break
+			}
+		}
+	}
+
+	go copyData(dst, src)
+	go copyData(src, dst)
+	wg.Wait()
+}
+
+// pipe sets up bidirectional data transfer between two TCP connections using splice.
+// func pipe(incomingConn, upstreamConn *net.TCPConn) {
+// 	// Create pipes for splice
+// 	var pipeFdsIncomingToUpstream [2]int
+// 	var pipeFdsUpstreamToIncoming [2]int
+// 	if err := unix.Pipe2(pipeFdsIncomingToUpstream[:], unix.O_NONBLOCK); err != nil {
+// 		log.Fatalf("failed to create pipe: %v", err)
+// 	}
+// 	if err := unix.Pipe2(pipeFdsUpstreamToIncoming[:], unix.O_NONBLOCK); err != nil {
+// 		log.Fatalf("failed to create pipe: %v", err)
+// 	}
+
+// 	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
+// 		for {
+// 			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *bufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK)
+// 			if err != nil {
+// 				if err == unix.EAGAIN {
+// 					continue
+// 				}
+// 				return err
+// 			}
+// 			if bytes == 0 {
+// 				return nil
+// 			}
+
+// 			for bytes > 0 {
+// 				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
+// 				if err != nil {
+// 					if err == unix.EAGAIN {
+// 						continue
+// 					}
+// 					// Hide "broken pipe" and "bad file descriptor" spam due to closed connection
+// 					if err == unix.EPIPE || err == unix.EBADFD {
+// 						return nil
+// 					}
+// 					return err
+// 				}
+// 				bytes -= written
+// 			}
+// 		}
+// 	}
+
+// 	srcFdIncoming, err := incomingConn.File()
+// 	if err != nil {
+// 		log.Printf("failed to get file descriptor for incomingConn: %v", err)
+// 	}
+// 	defer srcFdIncoming.Close()
+// 	srcFdUpstream, err := upstreamConn.File()
+// 	if err != nil {
+// 		log.Printf("failed to get file descriptor for upstreamConn: %v", err)
+// 	}
+// 	defer srcFdUpstream.Close()
+
+// 	// Transfer data from incomingConn to upstreamConn
+// 	done := make(chan struct{})
+// 	go func() {
+// 		if err := transfer(int(srcFdIncoming.Fd()), int(srcFdUpstream.Fd()), pipeFdsIncomingToUpstream); err != nil {
+// 			log.Printf("error during transfer from incoming to upstream: %v", err)
+// 		}
+// 		close(done)
+// 	}()
+
+// 	// Transfer data from upstreamConn to incomingConn
+// 	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
+// 		log.Printf("error during transfer from upstream to incoming: %v", err)
+// 	}
+// 	<-done
+// }
