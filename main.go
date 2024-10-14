@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -14,21 +14,29 @@ import (
 	"sync"
 	"syscall"
 
-	"golang.org/x/net/proxy"
-	"golang.org/x/sys/unix"
+	"github.com/florianl/go-nfqueue"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+
+	// "github.com/AkihiroSuda/go-netfilter-queue"
+	nfNetlink "github.com/mdlayher/netlink"
+	"github.com/vishvananda/netlink"
 )
 
-const GID = 2354
-
 var (
-	mainPort      = flag.String("mainPort", "21345", "Port to listen for iptables REDIRECT")
-	bufferSize    = flag.Int("bufferSize", 262144, "Buffer size for copying pipe")
-	socksAddr     = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 proxy address")
-	interfaceName = flag.String("interface", "", "proxy through interface instead of socks5")
+	queueNumber   = flag.Uint("queueNumber", 5123, "NFQUEUE number")
+	markNumber    = flag.Int("markNumber", 350, "Number for FWMARK, second +1")
+	tableNumber   = flag.Int("tableNumber", 3050, "Number for routing table")
+	interfaceName = flag.String("interface", "wg0", "interface for proxying domains from list")
 	proxyListFile = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
 	blockListFile = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
-	verbose       = flag.Bool("v", false, "Print all dials")
-	socksDialer   proxy.Dialer
+	silent        = flag.Bool("s", false, "Dont't print detected parsed domains")
+	nf            *nfqueue.Nfqueue
+	rule          *netlink.Rule
+	route         *netlink.Route
+
+	connections = make(map[ConnectionKey]bool)
+	connMutex   = &sync.Mutex{}
 )
 
 func red(str string) string {
@@ -50,10 +58,6 @@ func main() {
 		log.Fatal(red("Must be run as root"))
 	}
 
-	if err := syscall.Setgid(GID); err != nil {
-		log.Fatalf("Can't change GID: %v\n", err)
-	}
-
 	if *proxyListFile == "proxy.lst" && !fileExists(*proxyListFile) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", *proxyListFile)
 		fmt.Println("To download a sample proxy list, you can use the following command:")
@@ -67,8 +71,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	configureNetwork()
-	defer restoreNetwork()
+	// configureNetwork()
+	// defer restoreNetwork()
 	// Код для режима с пониженными привилегиями
 
 	sigChan := make(chan os.Signal, 1)
@@ -87,121 +91,286 @@ func main() {
 	runtime.ReadMemStats(&m)
 	log.Printf("Total mem usage: %v MiB\n", m.TotalAlloc/1024/1024)
 
-	ln, err := net.Listen("tcp", ":"+*mainPort)
-	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", ":"+*mainPort, err)
+	if *silent {
+		fmt.Println("Silent mode, run without -s for verbose output")
 	}
-	defer ln.Close()
-	log.Printf("Listening on %s", ":"+*mainPort)
 
-	socksDialer, err = proxy.SOCKS5("tcp", *socksAddr, nil, proxy.Direct)
+	// Настройка NFQUEUE
+	config := nfqueue.Config{
+		NfQueue:      uint16(*queueNumber),
+		MaxPacketLen: 65535,
+		MaxQueueLen:  1000,
+		Copymode:     nfqueue.NfQnlCopyPacket,
+	}
+
+	var err error
+	nf, err = nfqueue.Open(&config)
 	if err != nil {
-		log.Printf("Failed to create SOCKS5 dialer: %v", err)
+		log.Fatalf(red("Error:")+" opening nfqueue: %v", err)
+	}
+	defer nf.Close()
+
+	// Avoid receiving ENOBUFS errors.
+	if err := nf.SetOption(nfNetlink.NoENOBUFS, true); err != nil {
+		fmt.Printf("failed to set netlink option %v: %v\n",
+			nfNetlink.NoENOBUFS, err)
 		return
 	}
 
-	if *interfaceName == "" {
-		log.Println(green("Proxying will be done via socks5"))
-	} else {
-		log.Printf(green("Proxying will be done via: %s"), *interfaceName)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Обработчик пакетов
+	err = nf.RegisterWithErrorFunc(ctx, nfPacketHandler, nfErrorHandler)
+	if err != nil {
+		log.Fatalf(red("Error:")+" registering callback: %v", err)
 	}
 
-	if !*verbose {
-		fmt.Println("Silent mode, run with -v for verbose output")
-	}
+	setupRouting()
+	defer cleanupRouting()
+
+	configureNetwork()
+	defer restoreNetwork()
+
 	fmt.Println("====================")
-
-	work := true
-	go func() {
-		for work {
-			conn, err := ln.Accept()
-			if err != nil {
-				log.Printf("Failed to accept connection: %v", err)
-				continue
-			}
-
-			tcpConn, ok := conn.(*net.TCPConn)
-			if !ok {
-				log.Println("Not a TCP connection")
-				conn.Close()
-				continue
-			}
-
-			go handleConnection(tcpConn)
-		}
-	}()
-
 	<-sigChan
-	work = false
 	log.Println("Shutting down...")
 }
 
-func handleConnection(conn *net.TCPConn) {
-	defer conn.Close()
-	peeked, serverName, _ := readServerName(conn)
+// To improve your libnetfilter_queue application in terms of performance, you may consider the following tweaks:
+
+//     increase the default socket buffer size by means of nfnl_rcvbufsiz().
+//     set nice value of your process to -20 (maximum priority).
+//     set the CPU affinity of your process to a spare core that is not used to handle NIC interruptions.
+//     set NETLINK_NO_ENOBUFS socket option to avoid receiving ENOBUFS errors (requires Linux kernel >= 2.6.30).
+//     see –queue-balance option in NFQUEUE target for multi-threaded apps (it requires Linux kernel >= 2.6.31).
+//     consider using fail-open option see nfq_set_queue_flags() (it requires Linux kernel >= 3.6)
+//     increase queue max length with nfq_set_queue_maxlen() to resist to packets burst
+
+func nfErrorHandler(e error) int {
+	fmt.Printf(red("Error:")+" %v\n", e)
+	return 0
+}
+
+type ConnectionKey struct {
+	SrcIP   string
+	DstIP   string
+	DstPort layers.TCPPort
+}
+
+func nfPacketHandler(attr nfqueue.Attribute) int {
+	packet := gopacket.NewPacket(*attr.Payload, layers.LayerTypeIPv4, gopacket.Default)
+	ipLayer := packet.Layer(layers.LayerTypeIPv4)
+	tcpLayer := packet.Layer(layers.LayerTypeTCP)
+	if ipLayer == nil || tcpLayer == nil {
+		// Not a ipv4 packet
+		nf.SetVerdict(*attr.PacketID, nfqueue.NfAccept)
+		return 0
+	}
+	ip, _ := ipLayer.(*layers.IPv4)
+	tcp, _ := tcpLayer.(*layers.TCP)
+	conKey := ConnectionKey{ip.SrcIP.String(), ip.DstIP.String(), tcp.DstPort}
+	fmt.Printf("TCP IPv4   %s:%d  ->  %s:%d   Len: %d\n",
+		ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort, len(*attr.Payload))
+	_, exists := connections[conKey]
+	if exists || ip.DstIP.Equal(net.IPv4(104, 21, 54, 91)) {
+		println("conKey из списка обнаружен")
+		nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfAccept, *markNumber)
+		return 0
+	}
+
+	serverName, err := extractSNI(attr.Payload)
+	if err != nil {
+		nf.SetVerdict(*attr.PacketID, nfqueue.NfAccept)
+		return 0
+	}
 
 	_, blocked := blockedDomains[serverName]
 	if blocked {
-		if *verbose {
+		if !*silent {
 			log.Printf("Blocking %s", serverName)
 		}
-		return
+		err = nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
+		if err != nil {
+			log.Printf(red("Error:")+" dropping package: %v", err)
+		}
+		return 0
 	}
 
 	domain := trimDomain(serverName)
 	_, proxied := proxiedDomains[domain]
-	useSocks := proxied || testDomain(domain)
+	useVpn := proxied || testDomain(domain)
 
-	originalDst, err := getOriginalDst(conn)
+	if useVpn {
+		if !*silent {
+			log.Printf("Routing connection to %s via %s", serverName, *interfaceName)
+		}
+		connMutex.Lock()
+		connections[conKey] = true
+		connMutex.Unlock()
+		sendRst(*tcp, *ip)
+		// err = nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
+		err = nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfDrop, *markNumber+1)
+	} else {
+		if !*silent && serverName != "" {
+			log.Printf("Direct connection to %s", serverName)
+		}
+		err = nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfAccept, *markNumber+1)
+	}
+
 	if err != nil {
-		log.Printf("Failed to get original destination: %v", err)
+		log.Printf(red("Error:")+" setting mark: %v", err)
+	}
+
+	return 0 // No errors
+}
+
+func sendRst(tcp layers.TCP, ip layers.IPv4) {
+	rstTCP := &layers.TCP{
+		SrcPort: tcp.DstPort,
+		DstPort: tcp.SrcPort,
+		Seq:     tcp.Seq,
+		ACK:     true,
+		RST:     true,
+		Ack:     tcp.Seq + 1,
+		Window:  0,
+	}
+
+	rstIP := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+		SrcIP:    ip.DstIP,
+		DstIP:    ip.SrcIP,
+	}
+
+	err := rstTCP.SetNetworkLayerForChecksum(rstIP)
+	if err != nil {
+		log.Printf("SetNetworkLayerForChecksum error: %v", err)
+
 		return
 	}
-	if serverName == "" {
-		serverName = originalDst.String()
+
+	rstream := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
 	}
 
-	if useSocks {
-		if *verbose {
-			log.Printf("Proxying connection to %s", serverName)
-		}
-		if *interfaceName == "" {
-			proxyThroughSocks5(conn, originalDst, peeked)
-		} else {
-			proxyThroughInterface(conn, originalDst, peeked)
-		}
-	} else {
-		if *verbose {
-			log.Printf("Directly connection to %s", serverName)
-		}
-		handleDirectly(conn, originalDst, peeked)
+	err = gopacket.SerializeLayers(rstream, opts, rstIP, rstTCP)
+	if err != nil {
+		log.Printf("Ошибка сериализации: %v", err)
+		return
+	}
+
+	rawBytes := rstream.Bytes()
+
+	// Отправляем RST пакет через сырой сокет
+	err = sendRawPacket(rawBytes, ip.DstIP)
+	if err != nil {
+		log.Printf("Ошибка отправки RST пакета: %v", err)
 	}
 }
 
-func readServerName(conn *net.TCPConn) ([]byte, string, error) {
-	// Чтение TLS record header
-	header := make([]byte, 5)
-	_, err := conn.Read(header)
+func sendRawPacket(packet []byte, dstIP net.IP) error {
+	// Открываем сырой сокет
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err != nil {
-		return []byte{}, "", err
+		return err
 	}
 
-	// Проверка, что это ClientHello
-	if header[0] != 0x16 || header[1] != 0x03 || header[2] != 0x01 {
-		return header, "", errors.New("not a TLS 1.2 ClientHello")
+	defer syscall.Close(fd)
+
+	// Устанавливаем опцию IP_HDRINCL
+	err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
+	if err != nil {
+		return err
+	}
+
+	// Адрес назначения
+	sockaddr := &syscall.SockaddrInet4{
+		Port: 0, // Не используется для IPPROTO_RAW
+	}
+	copy(sockaddr.Addr[:], dstIP.To4())
+
+	// Отправляем пакет
+	return syscall.Sendto(fd, packet, 0, sockaddr)
+}
+
+func setupRouting() {
+	link, err := netlink.LinkByName(*interfaceName)
+	if err != nil {
+		log.Fatalf(red("Error:")+" getting `%s` interface: %v", *interfaceName, err)
+	}
+
+	route = &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Scope:     netlink.SCOPE_UNIVERSE,
+		Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+		Table:     *tableNumber,
+	}
+
+	err = netlink.RouteAdd(route)
+	if err != nil {
+		log.Printf(red("Error:")+" adding route: %v", err)
+	}
+
+	// Правила маршрутизации на основе меток
+	rule = netlink.NewRule()
+	rule.Mark = *markNumber
+	rule.Table = *tableNumber
+
+	err = netlink.RuleAdd(rule)
+	if err != nil {
+		log.Printf(red("Error:")+" adding rule: %v", err)
+	}
+	log.Println("Routing setup completed")
+}
+
+func cleanupRouting() {
+	err := netlink.RuleDel(rule)
+	if err != nil {
+		log.Printf(red("Error:")+" deleting rule: %v", err)
+	}
+
+	err = netlink.RouteDel(route)
+	if err != nil {
+		log.Printf(red("Error:")+" deleting route: %v", err)
+	}
+
+	log.Println("Routing cleanup completed")
+}
+
+func extractSNI(data *[]byte) (string, error) {
+	// Поиск начала TLS-сообщения
+	var tlsStart int = -1
+	for i := 0; i <= len(*data)-5; i++ {
+		if (*data)[i] == 0x16 && (*data)[i+1] == 0x03 && (*data)[i+2] == 0x01 {
+			tlsStart = i
+			break
+		}
+	}
+
+	if tlsStart == -1 {
+		return "", errors.New("TLS ClientHello not found in payload")
+	}
+
+	// Проверка, достаточно ли данных для TLS record header
+	if len(*data) < tlsStart+5 {
+		return "", errors.New("insufficient data for TLS record header")
 	}
 
 	// Получение длины ClientHello
-	length := int(binary.BigEndian.Uint16(header[3:5]))
+	length := int(binary.BigEndian.Uint16((*data)[tlsStart+3 : tlsStart+5]))
 
-	// Чтение ClientHello
-	clientHello := make([]byte, length)
-	_, err = conn.Read(clientHello)
-	// _, err = io.ReadFull(conn, clientHello)
-	peeked := append(header, clientHello...)
-	if err != nil {
-		return peeked, "", err
+	// Проверка, достаточно ли данных
+	if len(*data) < tlsStart+5+length {
+		return "", errors.New("insufficient data for ClientHello")
 	}
+
+	// Выделение ClientHello
+	clientHello := (*data)[tlsStart+5 : tlsStart+5+length]
 
 	// Пропуск фиксированных полей
 	pos := 38 // 2 (версия) + 32 (random) + 1 (session id length) + 3 (cipher suites length)
@@ -220,7 +389,7 @@ func readServerName(conn *net.TCPConn) ([]byte, string, error) {
 
 	// Проверка наличия расширений
 	if pos+2 > len(clientHello) {
-		return peeked, "", errors.New("no extensions in ClientHello")
+		return "", errors.New("no extensions in ClientHello")
 	}
 
 	// Получение длины расширений
@@ -243,7 +412,7 @@ func readServerName(conn *net.TCPConn) ([]byte, string, error) {
 
 			// Проверка типа имени (должен быть 0 для hostname)
 			if clientHello[pos] != 0 {
-				return peeked, "", errors.New("unexpected server name type")
+				return "", errors.New("unexpected server name type")
 			}
 			pos++
 
@@ -252,230 +421,12 @@ func readServerName(conn *net.TCPConn) ([]byte, string, error) {
 			pos += 2
 
 			// Извлечение и возврат имени хоста
-			return peeked, string(clientHello[pos : pos+hostnameLength]), nil
+			return string(clientHello[pos : pos+hostnameLength]), nil
 		}
 
 		// Переход к следующему расширению
 		pos += extLength
 	}
 
-	return peeked, "", errors.New("SNI not found in ClientHello")
+	return "", errors.New("SNI not found in ClientHello")
 }
-
-func getOriginalDst(conn *net.TCPConn) (*net.TCPAddr, error) {
-	file, err := conn.File()
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	fd := int(file.Fd())
-	addr, err := syscall.GetsockoptIPv6Mreq(fd, syscall.IPPROTO_IP, 80) // SO_ORIGINAL_DST
-	if err != nil {
-		return nil, err
-	}
-
-	ip := net.IPv4(addr.Multiaddr[4], addr.Multiaddr[5], addr.Multiaddr[6], addr.Multiaddr[7])
-	port := uint16(addr.Multiaddr[2])<<8 + uint16(addr.Multiaddr[3])
-
-	return &net.TCPAddr{
-		IP:   ip,
-		Port: int(port),
-	}, nil
-}
-
-func proxyThroughInterface(incomingConn *net.TCPConn, originalDst *net.TCPAddr, peeked []byte) {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
-	if err != nil {
-		log.Printf("Failed to create socket: %v", err)
-		return
-	}
-	defer unix.Close(fd)
-
-	if err := unix.BindToDevice(fd, *interfaceName); err != nil {
-		log.Printf("Failed to bind to device %s: %v", *interfaceName, err)
-		return
-	}
-
-	sa := &unix.SockaddrInet4{
-		Port: originalDst.Port,
-	}
-	copy(sa.Addr[:], originalDst.IP.To4())
-
-	if err := unix.Connect(fd, sa); err != nil {
-		log.Printf("Failed to connect: %v", err)
-		return
-	}
-
-	upstreamConn, err := net.FileConn(os.NewFile(uintptr(fd), ""))
-	if err != nil {
-		log.Printf("Failed to create net.Conn from file descriptor: %v", err)
-		return
-	}
-	defer upstreamConn.Close()
-	unix.Close(fd)
-
-	// upstreamConn, err := net.Dial(originalDst.Network(), originalDst.String())
-	// if err != nil {
-	// 	log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
-	// 	return
-	// }
-	// defer upstreamConn.Close()
-
-	// Отправляем ранее прочитанные данные
-	_, err = upstreamConn.Write(peeked)
-	if err != nil {
-		log.Printf("Failed to write initial data: %v", err)
-		return
-	}
-
-	pipe(incomingConn, upstreamConn.(*net.TCPConn))
-}
-
-func proxyThroughSocks5(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
-	proxyConn, err := socksDialer.Dial(originalDst.Network(), originalDst.String())
-	if err != nil {
-		log.Printf("Failed to dial %s through SOCKS5: %v", originalDst.String(), err)
-		return
-	}
-	defer proxyConn.Close()
-
-	// Отправляем ранее прочитанные данные
-	_, err = proxyConn.Write(peeked)
-	if err != nil {
-		log.Printf("Failed to write initial data: %v", err)
-		return
-	}
-
-	pipe(incomingConn, proxyConn.(*net.TCPConn))
-}
-
-func handleDirectly(incomingConn *net.TCPConn, originalDst net.Addr, peeked []byte) {
-	upstreamConn, err := net.Dial("tcp", originalDst.String())
-	if err != nil {
-		log.Printf("Failed to dial %s directly: %v", originalDst.String(), err)
-		return
-	}
-	defer upstreamConn.Close()
-
-	// Отправляем ранее прочитанные данные
-	_, err = upstreamConn.Write(peeked)
-	if err != nil {
-		log.Printf("Failed to write initial data: %v", err)
-		return
-	}
-
-	pipe(incomingConn, upstreamConn.(*net.TCPConn))
-}
-
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, *bufferSize)
-	},
-}
-
-// Faster that linux splice. Idk why
-func pipe(src, dst net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	copyData := func(writer, reader net.Conn) {
-		defer wg.Done()
-		buffer := bufferPool.Get().([]byte)
-		defer bufferPool.Put(buffer)
-
-		for {
-			n, err := reader.Read(buffer)
-			if err != nil {
-				if err == io.EOF || err == net.ErrClosed {
-					break
-				}
-				log.Printf("Reading error : %v", err)
-				break
-			}
-
-			// Записываем прочитанные данные в writer
-			_, err = writer.Write(buffer[:n])
-			if err == io.EOF || err == net.ErrClosed {
-				break
-			}
-			if err != nil {
-				log.Printf("Writing error: %v", err)
-				break
-			}
-		}
-	}
-
-	go copyData(dst, src)
-	go copyData(src, dst)
-	wg.Wait()
-}
-
-// pipe sets up bidirectional data transfer between two TCP connections using splice.
-// func pipe(incomingConn, upstreamConn *net.TCPConn) {
-// 	// Create pipes for splice
-// 	var pipeFdsIncomingToUpstream [2]int
-// 	var pipeFdsUpstreamToIncoming [2]int
-// 	if err := unix.Pipe2(pipeFdsIncomingToUpstream[:], unix.O_NONBLOCK); err != nil {
-// 		log.Fatalf("failed to create pipe: %v", err)
-// 	}
-// 	if err := unix.Pipe2(pipeFdsUpstreamToIncoming[:], unix.O_NONBLOCK); err != nil {
-// 		log.Fatalf("failed to create pipe: %v", err)
-// 	}
-
-// 	transfer := func(srcFd, dstFd int, pipeFds [2]int) error {
-// 		for {
-// 			bytes, err := unix.Splice(srcFd, nil, pipeFds[1], nil, *bufferSize, unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK)
-// 			if err != nil {
-// 				if err == unix.EAGAIN {
-// 					continue
-// 				}
-// 				return err
-// 			}
-// 			if bytes == 0 {
-// 				return nil
-// 			}
-
-// 			for bytes > 0 {
-// 				written, err := unix.Splice(pipeFds[0], nil, dstFd, nil, int(bytes), unix.SPLICE_F_MOVE|unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MORE)
-// 				if err != nil {
-// 					if err == unix.EAGAIN {
-// 						continue
-// 					}
-// 					// Hide "broken pipe" and "bad file descriptor" spam due to closed connection
-// 					if err == unix.EPIPE || err == unix.EBADFD {
-// 						return nil
-// 					}
-// 					return err
-// 				}
-// 				bytes -= written
-// 			}
-// 		}
-// 	}
-
-// 	srcFdIncoming, err := incomingConn.File()
-// 	if err != nil {
-// 		log.Printf("failed to get file descriptor for incomingConn: %v", err)
-// 	}
-// 	defer srcFdIncoming.Close()
-// 	srcFdUpstream, err := upstreamConn.File()
-// 	if err != nil {
-// 		log.Printf("failed to get file descriptor for upstreamConn: %v", err)
-// 	}
-// 	defer srcFdUpstream.Close()
-
-// 	// Transfer data from incomingConn to upstreamConn
-// 	done := make(chan struct{})
-// 	go func() {
-// 		if err := transfer(int(srcFdIncoming.Fd()), int(srcFdUpstream.Fd()), pipeFdsIncomingToUpstream); err != nil {
-// 			log.Printf("error during transfer from incoming to upstream: %v", err)
-// 		}
-// 		close(done)
-// 	}()
-
-// 	// Transfer data from upstreamConn to incomingConn
-// 	if err := transfer(int(srcFdUpstream.Fd()), int(srcFdIncoming.Fd()), pipeFdsUpstreamToIncoming); err != nil {
-// 		log.Printf("error during transfer from upstream to incoming: %v", err)
-// 	}
-// 	<-done
-// }
