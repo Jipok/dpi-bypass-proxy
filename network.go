@@ -1,16 +1,21 @@
 package main
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
-	"strings"
+
+	"github.com/vishvananda/netlink"
 )
 
 var (
 	NoOUTPUT = false
 	useNFT   = false
+	link     netlink.Link
 )
 
 func checkCommand(cmd string) bool {
@@ -36,133 +41,166 @@ func runCommand(cmd string) {
 	}
 }
 
-func configureNetwork() {
-	// runCommand("nft add table ip mangle")
-	// runCommand("nft 'add chain ip mangle prerouting { type filter hook output priority mangle; policy accept; }'")
-	// runCommand("nft 'add rule ip mangle prerouting tcp dport 443 ct state new queue num 5123'")
-	// // runCommand("nft 'add rule ip mangle prerouting ct state new ct mark set mark'")
-	// runCommand("nft 'add rule ip mangle prerouting ct mark != 0 meta mark set ct mark'")
-	// runCommand("nft 'add chain ip mangle output { type route hook output priority mangle; policy accept; }'")
-	// runCommand("nft 'add rule ip mangle output ct mark != 0 meta mark set ct mark'")
+func setupRouting() {
+	if *router {
+		runCommand(fmt.Sprintf(`iptables -t nat -A PREROUTING ! -i lo -p udp --dport 53 -j REDIRECT --to-port %s`, *dnsPort))
 
-	// runCommand("nft add table ip nat")
-	// runCommand("nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'")
-	// runCommand("nft 'add rule ip nat postrouting oifname 'wg0' meta mark 350 masquerade'")
+		// runCommand("iptables -A FORWARD -t mangle -j CONNMARK --restore-mark")
+		// runCommand(fmt.Sprintf(`iptables -t mangle -A FORWARD -p tcp --dport 443 -m mark --mark 0 -j NFQUEUE --queue-num %d`, *queueNumber))
+	} else {
+		runCommand(fmt.Sprintf(`iptables -t nat -A OUTPUT -m owner ! --gid-owner %d -p udp --dport 53 -j REDIRECT --to-port %s`, GID, *dnsPort))
 
-	runCommand("iptables -A FORWARD -t mangle -j CONNMARK --restore-mark")
-	runCommand("iptables -A OUTPUT -t mangle -j CONNMARK --restore-mark")
-	runCommand("iptables -A FORWARD -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num 5123")
-	runCommand("iptables -A OUTPUT -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num 5123")
-	runCommand("iptables -A POSTROUTING -t mangle -j CONNMARK --save-mark")
-	runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", *interfaceName))
+		// runCommand("iptables -A OUTPUT -t mangle -j CONNMARK --restore-mark")
+		// runCommand(fmt.Sprintf(`iptables -A OUTPUT -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num %d`, *queueNumber))
+	}
 
-	// runCommand("nft add table ip dpi-bypass")
-
-	// runCommand("nft add chain ip dpi-bypass output0 '{type filter hook output priority -120; }'")
-	// runCommand("nft add rule ip dpi-bypass output0 dup to @daddr device 'wg0'")
-
-	// runCommand("nft add chain ip dpi-bypass output '{type filter hook output priority -100; }'")
-	// runCommand("nft add rule ip dpi-bypass output tcp dport 443 oifname 'usb0' meta mark != 350 queue num 5123")
-	// runCommand("nft add rule ip dpi-bypass output mark set ct mark")
-
-	// runCommand("nft add chain ip dpi-bypass output2 '{type filter hook postrouting priority 0; }'")
-	// // runCommand("nft add rule ip dpi-bypass output2 ct mark set meta mark")
-
-	// // runCommand("nft add rule ip dpi-bypass output tcp dport 443 ct state new counter queue num 5123")
-	// runCommand("nft add chain ip dpi-bypass postrouting '{ type nat hook postrouting priority 0; }'")
-	// runCommand("nft add rule ip dpi-bypass postrouting oifname 'wg0' meta mark 350 masquerade")
-	// // runCommand("nft add rule ip dpi-bypass postrouting mark set ct mark")
-
-	// runCommand(fmt.Sprintf("iptables -A OUTPUT -p tcp --dport 443 -m mark ! --mark %d -m mark ! --mark %d -j NFQUEUE --queue-num %d", *markNumber, *markNumber+1, *queueNumber))
-	// runCommand(fmt.Sprintf("iptables -A FORWARD -p tcp --dport 443 -m mark ! --mark %d -m mark ! --mark %d -j NFQUEUE --queue-num %d", *markNumber, *markNumber+1, *queueNumber))
-	// runCommand(fmt.Sprintf("iptables -t mangle -A POSTROUTING -m mark --mark %d -j CONNMARK --save-mark", *markNumber))
-	// runCommand("iptables -t mangle -A OUTPUT -j CONNMARK --restore-mark")
+	// runCommand("iptables -A POSTROUTING -t mangle -j CONNMARK --save-mark")
 	// runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", *interfaceName))
-	return
-	iptablesAvailable := checkCommand("iptables")
-	nftablesAvailable := checkCommand("nft")
 
-	iptablesActive := checkRules("iptables -L") || fileExists("/proc/net/ip_tables_names")
-	nftablesActive := checkRules("nft list ruleset") || fileExists("/proc/net/nf_tables")
-
-	if nftablesAvailable && nftablesActive {
-		fmt.Println(green("Detected nftables"))
-		useNFT = true
-	} else if iptablesAvailable && iptablesActive {
-		fmt.Println(green("Detected iptables"))
-	} else if nftablesAvailable {
-		fmt.Println(yellow("Warning! Detected nftables, but may not be active"))
-		useNFT = true
-	} else if iptablesAvailable {
-		fmt.Println(yellow("Warning! Detected iptables, but may not be active"))
-
-	} else {
-		log.Fatal(red("Neither iptables nor nftables were found."))
+	var err error
+	link, err = netlink.LinkByName(*interfaceName)
+	if err != nil {
+		log.Fatalf(red("Error:")+" getting `%s` interface: %v", *interfaceName, err)
 	}
 
-	fmt.Printf("Trying run:\n")
-	if useNFT {
-		rule := ""
-		if *interfaceName != "" {
-			rule = fmt.Sprintf(`oifname != "%s"`, *interfaceName)
-		}
-		runCommand("nft add table inet dpi-bypass")
-		runCommand("nft add chain inet dpi-bypass prerouting '{ type nat hook prerouting priority -150; }'")
-		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass prerouting %s tcp dport 443 redirect to %s`, rule, 1))
-		runCommand("nft add chain inet dpi-bypass output '{ type nat hook output priority -150; }'")
-		runCommand(fmt.Sprintf(`nft add rule inet dpi-bypass output %s tcp dport 443 meta skgid != %d redirect to :%s`, rule, 1, 1))
-		log.Println(green("nftables successfully configured"))
-	} else {
-		rule := ""
-		if *interfaceName != "" {
-			rule = fmt.Sprintf(`! -i %s`, *interfaceName)
-		}
-		runCommand(fmt.Sprintf(`iptables -t nat -A PREROUTING %s -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, 1))
-		command := fmt.Sprintf(`iptables -t nat -A OUTPUT %s -m owner ! --gid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, 1, 1)
-		fmt.Println("  " + command)
-		output, err := exec.Command("sh", "-c", command).CombinedOutput()
-		if err != nil {
-			str := strings.ToLower(string(output))
-			if strings.Contains(str, "no") && strings.Contains(str, "chain") && strings.Contains(str, "by that name") {
-				fmt.Println("No OUTPUT found in iptables. OK for router")
-				NoOUTPUT = true
-			}
-		}
-		log.Println(green("iptables successfully configured"))
+	route = &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Scope:     netlink.SCOPE_UNIVERSE,
+		Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+		Table:     *tableNumber,
 	}
+
+	err = netlink.RouteAdd(route)
+	if err != nil {
+		log.Printf(red("Error:")+" adding route: %v", err)
+	}
+
+	// Правила маршрутизации на основе меток
+	rule = netlink.NewRule()
+	rule.Mark = *markNumber
+	rule.Table = *tableNumber
+
+	err = netlink.RuleAdd(rule)
+	if err != nil {
+		log.Printf(red("Error:")+" adding rule: %v", err)
+	}
+	log.Println("Routing setup completed")
 }
 
-func restoreNetwork() {
-	fmt.Printf("Trying run:\n")
-	runCommand("iptables -D FORWARD -t mangle -j CONNMARK --restore-mark")
-	runCommand("iptables -D OUTPUT -t mangle -j CONNMARK --restore-mark")
-	runCommand("iptables -D OUTPUT -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num 5123")
-	runCommand("iptables -D FORWARD -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num 5123")
-	runCommand("iptables -D POSTROUTING -t mangle -j CONNMARK --save-mark")
-	runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", *interfaceName))
+func cleanupRouting() {
+	if *router {
+		runCommand(fmt.Sprintf(`iptables -t nat -D PREROUTING ! -i lo -p udp --dport 53 -j REDIRECT --to-port %s`, *dnsPort))
 
-	runCommand("nft flush ruleset")
-	// runCommand("nft flush table ip mangle")
-	// runCommand("nft delete table ip mangle")
-	// runCommand(fmt.Sprintf("iptables -D OUTPUT -p tcp --dport 443 -m mark ! --mark %d -m mark ! --mark %d -j NFQUEUE --queue-num %d", *markNumber, *markNumber+1, *queueNumber))
-	// runCommand(fmt.Sprintf("iptables -D FORWARD -p tcp --dport 443 -m mark ! --mark %d -m mark ! --mark %d -j NFQUEUE --queue-num %d", *markNumber, *markNumber+1, *queueNumber))
-	// runCommand(fmt.Sprintf("iptables -t mangle -D POSTROUTING -m mark --mark %d -j CONNMARK --save-mark", *markNumber))
-	// runCommand("iptables -t mangle -D OUTPUT -j CONNMARK --restore-mark")
-	// runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", *interfaceName))
-	return
-	if useNFT {
-		runCommand("nft flush table inet dpi-bypass")
-		runCommand("nft delete table inet dpi-bypass")
-		log.Println(green("nftables successfully cleaned"))
+		// runCommand("iptables -D FORWARD -t mangle -j CONNMARK --restore-mark")
+		// runCommand(fmt.Sprintf(`iptables -t mangle -D FORWARD -p tcp --dport 443 -m mark --mark 0 -j NFQUEUE --queue-num %d`, *queueNumber))
 	} else {
-		rule := ""
-		if *interfaceName != "" {
-			rule = fmt.Sprintf(`! -i %s`, *interfaceName)
-		}
-		runCommand(fmt.Sprintf(`iptables -t nat -D PREROUTING %s -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, 1))
-		if !NoOUTPUT {
-			runCommand(fmt.Sprintf(`iptables -t nat -D OUTPUT %s -m owner ! --gid-owner %d -p tcp --dport 443 -j REDIRECT --to-port %s`, rule, 1, 1))
-		}
-		log.Println(green("iptables successfully cleaned"))
+		runCommand(fmt.Sprintf(`iptables -t nat -D OUTPUT -m owner ! --gid-owner %d -p udp --dport 53 -j REDIRECT --to-port %s`, GID, *dnsPort))
+
+		// runCommand("iptables -D OUTPUT -t mangle -j CONNMARK --restore-mark")
+		// runCommand(fmt.Sprintf(`iptables -D OUTPUT -m mark --mark 0 -p tcp --destination-port 443 -j NFQUEUE --queue-num %d`, *queueNumber))
 	}
+
+	// runCommand("iptables -D POSTROUTING -t mangle -j CONNMARK --save-mark")
+	// runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", *interfaceName))
+
+	err := netlink.RuleDel(rule)
+	if err != nil {
+		log.Printf(red("Error:")+" deleting rule: %v", err)
+	}
+
+	err = netlink.RouteDel(route)
+	if err != nil {
+		log.Printf(red("Error:")+" deleting route: %v", err)
+	}
+
+	log.Println("Routing cleanup completed")
+}
+
+func extractSNI(data *[]byte) (string, error) {
+	// Поиск начала TLS-сообщения
+	var tlsStart int = -1
+	for i := 0; i <= len(*data)-5; i++ {
+		if (*data)[i] == 0x16 && (*data)[i+1] == 0x03 && (*data)[i+2] == 0x01 {
+			tlsStart = i
+			break
+		}
+	}
+
+	if tlsStart == -1 {
+		return "", errors.New("TLS ClientHello not found in payload")
+	}
+
+	// Проверка, достаточно ли данных для TLS record header
+	if len(*data) < tlsStart+5 {
+		return "", errors.New("insufficient data for TLS record header")
+	}
+
+	// Получение длины ClientHello
+	length := int(binary.BigEndian.Uint16((*data)[tlsStart+3 : tlsStart+5]))
+
+	// Проверка, достаточно ли данных
+	if len(*data) < tlsStart+5+length {
+		return "", errors.New("insufficient data for ClientHello")
+	}
+
+	// Выделение ClientHello
+	clientHello := (*data)[tlsStart+5 : tlsStart+5+length]
+
+	// Пропуск фиксированных полей
+	pos := 38 // 2 (версия) + 32 (random) + 1 (session id length) + 3 (cipher suites length)
+
+	// Пропуск session id
+	sessionIDLength := int(clientHello[pos])
+	pos += 1 + sessionIDLength
+
+	// Пропуск cipher suites
+	cipherSuitesLength := int(binary.BigEndian.Uint16(clientHello[pos : pos+2]))
+	pos += 2 + cipherSuitesLength
+
+	// Пропуск compression methods
+	compMethodsLength := int(clientHello[pos])
+	pos += 1 + compMethodsLength
+
+	// Проверка наличия расширений
+	if pos+2 > len(clientHello) {
+		return "", errors.New("no extensions in ClientHello")
+	}
+
+	// Получение длины расширений
+	extensionsLength := int(binary.BigEndian.Uint16(clientHello[pos : pos+2]))
+	pos += 2
+
+	// Парсинг расширений
+	endPos := pos + extensionsLength
+	for pos < endPos {
+		// Получение типа и длины расширения
+		extType := binary.BigEndian.Uint16(clientHello[pos : pos+2])
+		extLength := int(binary.BigEndian.Uint16(clientHello[pos+2 : pos+4]))
+		pos += 4
+
+		// Проверка, является ли расширение SNI (тип 0)
+		if extType == 0 {
+			// Пропуск длину списка имен серверов
+			// sniListLength := int(binary.BigEndian.Uint16(clientHello[pos : pos+2]))
+			pos += 2
+
+			// Проверка типа имени (должен быть 0 для hostname)
+			if clientHello[pos] != 0 {
+				return "", errors.New("unexpected server name type")
+			}
+			pos++
+
+			// Получение длины имени хоста
+			hostnameLength := int(binary.BigEndian.Uint16(clientHello[pos : pos+2]))
+			pos += 2
+
+			// Извлечение и возврат имени хоста
+			return string(clientHello[pos : pos+hostnameLength]), nil
+		}
+
+		// Переход к следующему расширению
+		pos += extLength
+	}
+
+	return "", errors.New("SNI not found in ClientHello")
 }

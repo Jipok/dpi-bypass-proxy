@@ -41,8 +41,7 @@ func testDomain(domain string) bool {
 		"youtube",
 		"ytimg.com",
 		"gstatic.com",
-		"googleapis.com",
-		"googlevideo.com",
+		"google",
 		"ggpht.com",
 		//
 		"casino",
