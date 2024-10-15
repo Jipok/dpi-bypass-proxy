@@ -82,6 +82,7 @@ func readDomains(sources string, trim bool) (map[string]struct{}, int) {
 			domain, _ = strings.CutPrefix(domain, "http.")
 			domain, _ = strings.CutPrefix(domain, "0.0.0.0 ")
 			domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
+			domain = strings.ToLower(domain)
 			if trim {
 				domain = trimDomain(domain)
 			}
