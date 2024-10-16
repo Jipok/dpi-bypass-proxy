@@ -37,6 +37,7 @@ var (
 
 	connections = make(map[ConnectionKey]bool)
 	connMutex   = &sync.Mutex{}
+	link        netlink.Link
 )
 
 func red(str string) string {
@@ -78,6 +79,12 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	var err error
+	link, err = netlink.LinkByName(*interfaceName)
+	if err != nil {
+		log.Fatalf(red("Error:")+" getting `%s` interface: %v", *interfaceName, err)
+	}
+
 	counter := 0
 	proxiedDomains, counter = readDomains(*proxyListFile, true)
 	log.Printf("Proxies %d top-level domains\n", counter)
@@ -103,7 +110,6 @@ func main() {
 		Copymode:     nfqueue.NfQnlCopyPacket,
 	}
 
-	var err error
 	nf, err = nfqueue.Open(&config)
 	if err != nil {
 		log.Fatalf(red("Error:")+" opening nfqueue: %v", err)
@@ -169,15 +175,8 @@ func nfPacketHandler(attr nfqueue.Attribute) int {
 	}
 	ip, _ := ipLayer.(*layers.IPv4)
 	tcp, _ := tcpLayer.(*layers.TCP)
-	conKey := ConnectionKey{ip.SrcIP.String(), ip.DstIP.String(), tcp.DstPort}
 	fmt.Printf("TCP IPv4   %s:%d  ->  %s:%d   Len: %d\n",
 		ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort, len(*attr.Payload))
-	_, exists := connections[conKey]
-	if exists || ip.DstIP.Equal(net.IPv4(104, 21, 54, 91)) {
-		println("conKey из списка обнаружен")
-		nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfAccept, *markNumber)
-		return 0
-	}
 
 	serverName, err := extractSNI(attr.Payload)
 	if err != nil {
@@ -190,10 +189,7 @@ func nfPacketHandler(attr nfqueue.Attribute) int {
 		if !*silent {
 			log.Printf("Blocking %s", serverName)
 		}
-		err = nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
-		if err != nil {
-			log.Printf(red("Error:")+" dropping package: %v", err)
-		}
+		nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
 		return 0
 	}
 
@@ -205,17 +201,31 @@ func nfPacketHandler(attr nfqueue.Attribute) int {
 		if !*silent {
 			log.Printf("Routing connection to %s via %s", serverName, *interfaceName)
 		}
-		connMutex.Lock()
-		connections[conKey] = true
-		connMutex.Unlock()
-		sendRst(*tcp, *ip)
-		// err = nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
-		err = nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfDrop, *markNumber+1)
+		// Add route via wg0
+		route := &netlink.Route{
+			LinkIndex: link.Attrs().Index,
+			Scope:     netlink.SCOPE_UNIVERSE,
+			Dst:       &net.IPNet{IP: ip.DstIP, Mask: net.CIDRMask(32, 32)},
+			Table:     0,
+		}
+
+		err = netlink.RouteAdd(route)
+		if err != nil {
+			log.Printf("Error adding route: %v", err)
+		}
+
+		// Send TCP RST to the client
+		err = sendTCPRST(ip, tcp)
+		if err != nil {
+			log.Printf("Error sending TCP RST: %v", err)
+		}
+
+		err = nf.SetVerdict(*attr.PacketID, nfqueue.NfDrop)
 	} else {
 		if !*silent && serverName != "" {
 			log.Printf("Direct connection to %s", serverName)
 		}
-		err = nf.SetVerdictWithMark(*attr.PacketID, nfqueue.NfAccept, *markNumber+1)
+		err = nf.SetVerdict(*attr.PacketID, nfqueue.NfAccept)
 	}
 
 	if err != nil {
@@ -225,85 +235,98 @@ func nfPacketHandler(attr nfqueue.Attribute) int {
 	return 0 // No errors
 }
 
-func sendRst(tcp layers.TCP, ip layers.IPv4) {
-	rstTCP := &layers.TCP{
-		SrcPort: tcp.DstPort,
-		DstPort: tcp.SrcPort,
-		Seq:     tcp.Seq,
-		ACK:     true,
-		RST:     true,
-		Ack:     tcp.Seq + 1,
-		Window:  0,
+func checksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += uint32(data[i])<<8 + uint32(data[i+1])
 	}
-
-	rstIP := &layers.IPv4{
-		Version:  4,
-		IHL:      5,
-		TTL:      64,
-		Protocol: layers.IPProtocolTCP,
-		SrcIP:    ip.DstIP,
-		DstIP:    ip.SrcIP,
+	if len(data)%2 == 1 {
+		sum += uint32(data[len(data)-1]) << 8
 	}
-
-	err := rstTCP.SetNetworkLayerForChecksum(rstIP)
-	if err != nil {
-		log.Printf("SetNetworkLayerForChecksum error: %v", err)
-
-		return
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
-
-	rstream := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-
-	err = gopacket.SerializeLayers(rstream, opts, rstIP, rstTCP)
-	if err != nil {
-		log.Printf("Ошибка сериализации: %v", err)
-		return
-	}
-
-	rawBytes := rstream.Bytes()
-
-	// Отправляем RST пакет через сырой сокет
-	err = sendRawPacket(rawBytes, ip.DstIP)
-	if err != nil {
-		log.Printf("Ошибка отправки RST пакета: %v", err)
-	}
+	return uint16(^sum)
 }
 
-func sendRawPacket(packet []byte, dstIP net.IP) error {
-	// Открываем сырой сокет
+func sendTCPRST(ip *layers.IPv4, tcp *layers.TCP) error {
+	// Swap source and destination IPs and Ports
+	srcIP := ip.DstIP.To4()
+	dstIP := ip.SrcIP.To4()
+	srcPort := uint16(tcp.DstPort)
+	dstPort := uint16(tcp.SrcPort)
+	seqNum := tcp.Ack
+	ackNum := tcp.Seq + uint32(len(tcp.Payload))
+
+	// Create raw socket
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err != nil {
-		return err
+		return fmt.Errorf("Failed to create raw socket: %v", err)
 	}
-
 	defer syscall.Close(fd)
 
-	// Устанавливаем опцию IP_HDRINCL
-	err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
-	if err != nil {
-		return err
+	// Set IP_HDRINCL to tell the kernel that headers are included in the packet
+	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
+		return fmt.Errorf("Failed to set IP_HDRINCL: %v", err)
 	}
 
-	// Адрес назначения
-	sockaddr := &syscall.SockaddrInet4{
-		Port: 0, // Не используется для IPPROTO_RAW
-	}
-	copy(sockaddr.Addr[:], dstIP.To4())
+	// Build IP header
+	ipHeader := make([]byte, 20)
+	ipHeader[0] = 0x45     // Version (4 bits) + IHL (4 bits)
+	ipHeader[1] = 0x00     // Type of Service
+	totalLength := 20 + 20 // IP header + TCP header
+	binary.BigEndian.PutUint16(ipHeader[2:], uint16(totalLength))
+	binary.BigEndian.PutUint16(ipHeader[4:], 0) // Identification
+	binary.BigEndian.PutUint16(ipHeader[6:], 0) // Flags + Fragment Offset
+	ipHeader[8] = 64                            // TTL
+	ipHeader[9] = syscall.IPPROTO_TCP           // Protocol
+	copy(ipHeader[12:16], srcIP)
+	copy(ipHeader[16:20], dstIP)
+	ipChecksum := checksum(ipHeader)
+	binary.BigEndian.PutUint16(ipHeader[10:], ipChecksum)
 
-	// Отправляем пакет
-	return syscall.Sendto(fd, packet, 0, sockaddr)
+	// Build TCP header
+	tcpHeader := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcpHeader[0:], srcPort)
+	binary.BigEndian.PutUint16(tcpHeader[2:], dstPort)
+	binary.BigEndian.PutUint32(tcpHeader[4:], seqNum)
+	binary.BigEndian.PutUint32(tcpHeader[8:], ackNum)
+	tcpHeader[12] = (5 << 4)                      // Data Offset (5 words) << 4
+	tcpHeader[13] = 0x14                          // Flags (RST + ACK)
+	binary.BigEndian.PutUint16(tcpHeader[14:], 0) // Window Size
+	binary.BigEndian.PutUint16(tcpHeader[16:], 0) // Checksum (initially zero)
+	binary.BigEndian.PutUint16(tcpHeader[18:], 0) // Urgent Pointer
+
+	// Pseudo-header for TCP checksum calculation
+	pseudoHeader := make([]byte, 12+20)
+	copy(pseudoHeader[0:4], srcIP)
+	copy(pseudoHeader[4:8], dstIP)
+	pseudoHeader[8] = 0
+	pseudoHeader[9] = syscall.IPPROTO_TCP
+	binary.BigEndian.PutUint16(pseudoHeader[10:], uint16(len(tcpHeader)))
+	copy(pseudoHeader[12:], tcpHeader)
+
+	tcpChecksum := checksum(pseudoHeader)
+	binary.BigEndian.PutUint16(tcpHeader[16:], tcpChecksum)
+
+	// Combine IP and TCP headers
+	packet := append(ipHeader, tcpHeader...)
+
+	// Destination address
+	addr := &syscall.SockaddrInet4{
+		Port: 0, // Port is zero for raw sockets
+		Addr: [4]byte{dstIP[0], dstIP[1], dstIP[2], dstIP[3]},
+	}
+
+	// Send the packet
+	if err := syscall.Sendto(fd, packet, 0, addr); err != nil {
+		return fmt.Errorf("Failed to send packet: %v", err)
+	}
+
+	return nil
 }
 
 func setupRouting() {
-	link, err := netlink.LinkByName(*interfaceName)
-	if err != nil {
-		log.Fatalf(red("Error:")+" getting `%s` interface: %v", *interfaceName, err)
-	}
-
 	route = &netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Scope:     netlink.SCOPE_UNIVERSE,
@@ -311,7 +334,7 @@ func setupRouting() {
 		Table:     *tableNumber,
 	}
 
-	err = netlink.RouteAdd(route)
+	err := netlink.RouteAdd(route)
 	if err != nil {
 		log.Printf(red("Error:")+" adding route: %v", err)
 	}
