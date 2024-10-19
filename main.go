@@ -1,31 +1,31 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
+	"time"
 
-	"github.com/miekg/dns"
+	"github.com/florianl/go-nfqueue"
 
+	nfNetlink "github.com/mdlayher/netlink"
 	"github.com/vishvananda/netlink"
 )
 
 const GID = 2354
 
 var (
-	dnsPort       = flag.String("dnsPort", "3053", "port for DNS proxy-server")
 	interfaceName = flag.String("interface", "wg0", "interface for proxying domains from list")
 	proxyListFile = flag.String("proxyList", "proxy.lst", "File with list of domains to proxy")
 	blockListFile = flag.String("blockList", "blocks.lst", "File with list of domains to BLOCK")
-	router        = flag.Bool("router", true, "Is router?")
 	silent        = flag.Bool("s", false, "Dont't print new DNS entries")
 	verbose       = flag.Bool("v", false, "Print every :433 connection status")
+	noClear       = flag.Bool("noClear", false, "Do not clear routing table on exit")
 
 	blockIPset = NewIPv4Set(1000)
 	proxyIPset = NewIPv4Set(1000)
@@ -41,6 +41,11 @@ func green(str string) string {
 
 func yellow(str string) string {
 	return "\033[33m" + str + "\033[0m"
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
 
 func main() {
@@ -95,93 +100,99 @@ func main() {
 		log.Fatalf(red("Error:")+" getting `%s` interface: %v", *interfaceName, err)
 	}
 
-	// Start dns server
-	server := &dns.Server{Addr: ":" + *dnsPort, Net: "udp"}
-	dns.HandleFunc(".", handleDNSRequest)
-	log.Printf("Starting DNS-proxy-server on :%s \n", *dnsPort)
-	go func() {
-		if err := server.ListenAndServe(); err != nil {
-			log.Fatalf("DNS-server error: %v", err)
-		}
-	}()
-
 	// Setup iptables
 	setupRouting()
 	defer cleanupRouting()
+
+	// Set configuration options for nfqueue
+	config := nfqueue.Config{
+		NfQueue:      2034,
+		MaxPacketLen: 0xFFFF,
+		MaxQueueLen:  0xFF,
+		Copymode:     nfqueue.NfQnlCopyPacket,
+		WriteTimeout: 15 * time.Millisecond,
+	}
+
+	nf, err := nfqueue.Open(&config)
+	if err != nil {
+		log.Fatal("could not open nfqueue socket:", err)
+		return
+	}
+	defer nf.Close()
+
+	// Avoid receiving ENOBUFS errors.
+	if err := nf.SetOption(nfNetlink.NoENOBUFS, true); err != nil {
+		fmt.Printf("failed to set netlink option %v: %v\n",
+			nfNetlink.NoENOBUFS, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fn := func(a nfqueue.Attribute) int {
+		id := *a.PacketID
+		nf.SetVerdict(id, processPacket(*a.Payload))
+		return 0
+	}
+
+	// Register your function to listen on nflqueue queue 100
+	err = nf.RegisterWithErrorFunc(ctx, fn, func(e error) int {
+		fmt.Println(err)
+		return -1
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
 	fmt.Println("====================")
 	<-sigChan
 	log.Println("Shutting down...")
 }
 
-func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) == 0 {
-		dns.HandleFailed(w, r)
-		return
+// processPacket обрабатывает перехваченный пакет
+func processPacket(packet []byte) int {
+	dnsPayload, err := extractDNSPayload(packet)
+	if err != nil {
+		// Not a DNS-answer
+		return nfqueue.NfAccept // TODO or drop?
 	}
 
-	question := r.Question[0]
-	domain, _ := strings.CutSuffix(question.Name, ".")
-	domain = strings.ToLower(domain)
-	// qtype := dns.TypeToString[question.Qtype]
-
-	// Пересылаем запрос на целевой DNS-сервер
-	client := new(dns.Client)
-	response, _, err := client.Exchange(r, "8.8.8.8:53")
-	if err != nil || response == nil {
-		dns.HandleFailed(w, r)
-		return
-	}
-	response.Id = r.Id
-
-	// Обрабатываем ответы
-	var ips []net.IP
-	for _, ans := range response.Answer {
-		if aRecord, ok := ans.(*dns.A); ok {
-			ips = append(ips, aRecord.A)
-		}
-		// Для IPv6:
-		// if aaaaRecord, ok := ans.(*dns.AAAA); ok {
-		// 	ips = append(ips, aaaaRecord.AAAA.String())
-		// }
-	}
-
-	_, blocked := blockedDomains[domain]
-	if blocked {
-		for _, ip := range ips {
-			if blockIPset.Add(ip) && !*silent {
-				log.Printf("Blocking %s %v", domain, ip)
+	// Block?
+	for _, resolved := range parseDNSResponse(dnsPayload) {
+		_, blocked := blockedDomains[resolved.name]
+		if blocked {
+			if blockIPset.Add(resolved.ip) && !*silent {
+				log.Printf("Blocking DNS-answer for %s", resolved.name)
 			}
+			return nfqueue.NfDrop
 		}
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.Rcode = dns.RcodeNameError
-		w.WriteMsg(m)
-		return
+
 	}
 
-	if len(ips) == 0 {
-		w.WriteMsg(response)
-		return
-	}
-
-	domain = trimDomain(domain)
-	_, proxied := proxiedDomains[domain]
-	if proxied || testDomain(domain) {
-		for _, ip := range ips {
-			if proxyIPset.Add(ip) {
-				addRoute(ip)
+	// Proxy?
+	direct := true
+	for _, resolved := range parseDNSResponse(dnsPayload) {
+		trimmedDomain := trimDomain(resolved.name)
+		_, proxied := proxiedDomains[trimmedDomain]
+		if proxied || testDomain(trimmedDomain) {
+			direct = false
+			if proxyIPset.Add(resolved.ip) {
+				addRoute(resolved.ip)
 				if !*silent {
-					log.Printf("New proxy route %s %v", domain, ip)
+					log.Printf("New proxy route %s :: %v", resolved.name, resolved.ip)
 				}
 			}
 		}
-		w.WriteMsg(response)
-		return
+
 	}
 
-	if *verbose {
-		fmt.Printf("Direct %s, IP: %v\n", domain, ips)
+	if *verbose && direct {
+		for _, resolved := range parseDNSResponse(dnsPayload) {
+			log.Printf("Direct %s :: %v\n", resolved.name, resolved.ip)
+		}
 	}
-	w.WriteMsg(response)
+
+	return nfqueue.NfAccept
 }
