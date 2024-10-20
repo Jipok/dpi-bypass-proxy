@@ -178,7 +178,7 @@ func processPacket(packet []byte) int {
 		if proxied || checkPatterns(trimmedDomain, proxiedPatterns) != "" {
 			direct = false
 			if proxyIPset.Add(resolved.ip) {
-				addRoute(resolved.ip)
+				go addRoute(resolved.ip)
 				if !*silent {
 					log.Printf("New proxy route %s :: %v", resolved.name, resolved.ip)
 				}
