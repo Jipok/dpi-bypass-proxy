@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -15,24 +15,46 @@ var (
 	blockedPatterns []string
 )
 
-// Check for pattern for filepath.Match
 func isPattern(s string) bool {
-	specialChars := "*?[]{}"
-	return strings.ContainsAny(s, specialChars)
+	return strings.Contains(s, "*")
 }
 
-func testDomain(domain string, list []string) bool {
-	for _, pattern := range list {
-		match, err := filepath.Match(pattern, domain)
-		if err != nil {
-			log.Fatalf("Pattern `%s` error:", pattern, err)
+func checkPattern(pattern, str string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == str
+	}
+
+	// Begin
+	if !strings.HasPrefix(str, parts[0]) {
+		return false
+	}
+	str = str[len(parts[0]):]
+
+	// Middle
+	for i := 1; i < len(parts)-1; i++ {
+		index := strings.Index(str, parts[i])
+		if index == -1 {
+			return false
 		}
-		if match {
-			return true
+		str = str[index+len(parts[i]):]
+	}
+
+	// End
+	return strings.HasSuffix(str, parts[len(parts)-1])
+}
+
+func checkPatterns(str string, list []string) string {
+	for _, pattern := range list {
+		ok := checkPattern(pattern, str)
+		if ok {
+			return pattern
 		}
 	}
-	return false
+	return ""
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 // a.b.site.com   -> site.com
 // aboba.ru       -> aboba.ru
@@ -58,9 +80,7 @@ func trimDomain(domain string) string {
 	return strings.Join(lastTwo, ".")
 }
 
-func readDomains(sources string, fn func(domain string) bool) int {
-	counter := 0
-
+func readDomains(sources string, fn func(domain string)) {
 	for _, source := range strings.Split(sources, ";") {
 		source = strings.TrimSpace(source)
 		if source == "" {
@@ -75,7 +95,12 @@ func readDomains(sources string, fn func(domain string) bool) int {
 
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			domain := strings.TrimSpace(scanner.Text())
+			domain := scanner.Text()
+			// Remove comment
+			if idx := strings.Index(domain, "#"); idx != -1 {
+				domain = domain[:idx]
+			}
+			domain = strings.TrimSpace(domain)
 			domain, _ = strings.CutPrefix(domain, "https-")
 			domain, _ = strings.CutPrefix(domain, "https.")
 			domain, _ = strings.CutPrefix(domain, "http-")
@@ -87,9 +112,6 @@ func readDomains(sources string, fn func(domain string) bool) int {
 			if domain == "" {
 				continue
 			}
-			if domain[0] == '#' {
-				continue
-			}
 			fn(domain)
 		}
 
@@ -98,36 +120,40 @@ func readDomains(sources string, fn func(domain string) bool) int {
 		}
 	}
 
-	return counter
 }
 
-func addProxiedDomain(domain string) bool {
-	if testDomain(domain, proxiedPatterns) {
-		return false
+func addProxiedDomain(domain string) {
+	pattern := checkPatterns(domain, proxiedPatterns)
+	if pattern != "" {
+		if *verbose {
+			fmt.Printf("PROXY: %s  ==  %s\n", pattern, domain)
+		}
+		return
 	}
 	if isPattern(domain) {
 		proxiedPatterns = append(proxiedPatterns, domain)
-		return true
+		return
 	}
 	domain = trimDomain(domain)
 	if _, exists := proxiedDomains[domain]; !exists {
 		proxiedDomains[domain] = struct{}{}
-		return true
 	}
-	return false
 }
 
-func addBlockedDomain(domain string) bool {
-	if testDomain(domain, blockedPatterns) {
-		return false
+func addBlockedDomain(domain string) {
+	pattern := checkPatterns(domain, blockedPatterns)
+	if pattern != "" {
+		if *verbose {
+			fmt.Printf("BLOCK: %s  ==  %s\n", pattern, domain)
+		}
+		return
 	}
 	if isPattern(domain) {
 		blockedPatterns = append(blockedPatterns, domain)
-		return true
+		println(domain)
+		return
 	}
 	if _, exists := blockedDomains[domain]; !exists {
 		blockedDomains[domain] = struct{}{}
-		return true
 	}
-	return false
 }

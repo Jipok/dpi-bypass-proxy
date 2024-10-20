@@ -77,13 +77,12 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	//
-	counter := 0
-	counter = readDomains(*proxyListFile, addProxiedDomain)
-	log.Printf("Proxies %d top-level domains\n", counter)
+	readDomains(*proxyListFile, addProxiedDomain)
+	log.Printf("Proxies %d top-level domains, %d globs\n", len(proxiedDomains), len(proxiedPatterns))
 	runtime.GC()
 
-	counter = readDomains(*blockListFile, addBlockedDomain)
-	log.Printf("Block %d domains\n", counter)
+	readDomains(*blockListFile, addBlockedDomain)
+	log.Printf("Block %d domains, %d globs\n", len(blockedDomains), len(blockedPatterns))
 	runtime.GC()
 
 	var m runtime.MemStats
@@ -162,7 +161,7 @@ func processPacket(packet []byte) int {
 	// Block?
 	for _, resolved := range parseDNSResponse(dnsPayload) {
 		_, blocked := blockedDomains[resolved.name]
-		if blocked || testDomain(resolved.name, blockedPatterns) {
+		if blocked || checkPatterns(resolved.name, blockedPatterns) != "" {
 			if blockIPset.Add(resolved.ip) && !*silent {
 				log.Printf("Blocking DNS-answer for %s", resolved.name)
 			}
@@ -176,7 +175,7 @@ func processPacket(packet []byte) int {
 	for _, resolved := range parseDNSResponse(dnsPayload) {
 		trimmedDomain := trimDomain(resolved.name)
 		_, proxied := proxiedDomains[trimmedDomain]
-		if proxied || testDomain(trimmedDomain, proxiedPatterns) {
+		if proxied || checkPatterns(trimmedDomain, proxiedPatterns) != "" {
 			direct = false
 			if proxyIPset.Add(resolved.ip) {
 				addRoute(resolved.ip)
