@@ -78,11 +78,11 @@ func main() {
 
 	//
 	counter := 0
-	proxiedDomains, counter = readDomains(*proxyListFile, true)
+	counter = readDomains(*proxyListFile, addProxiedDomain)
 	log.Printf("Proxies %d top-level domains\n", counter)
 	runtime.GC()
 
-	blockedDomains, counter = readDomains(*blockListFile, false)
+	counter = readDomains(*blockListFile, addBlockedDomain)
 	log.Printf("Block %d domains\n", counter)
 	runtime.GC()
 
@@ -162,7 +162,7 @@ func processPacket(packet []byte) int {
 	// Block?
 	for _, resolved := range parseDNSResponse(dnsPayload) {
 		_, blocked := blockedDomains[resolved.name]
-		if blocked {
+		if blocked || testDomain(resolved.name, blockedPatterns) {
 			if blockIPset.Add(resolved.ip) && !*silent {
 				log.Printf("Blocking DNS-answer for %s", resolved.name)
 			}
@@ -176,7 +176,7 @@ func processPacket(packet []byte) int {
 	for _, resolved := range parseDNSResponse(dnsPayload) {
 		trimmedDomain := trimDomain(resolved.name)
 		_, proxied := proxiedDomains[trimmedDomain]
-		if proxied || testDomain(trimmedDomain) {
+		if proxied || testDomain(trimmedDomain, proxiedPatterns) {
 			direct = false
 			if proxyIPset.Add(resolved.ip) {
 				addRoute(resolved.ip)

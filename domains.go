@@ -4,13 +4,35 @@ import (
 	"bufio"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 var (
-	proxiedDomains map[string]struct{}
-	blockedDomains map[string]struct{}
+	proxiedDomains  = make(map[string]struct{})
+	proxiedPatterns []string
+	blockedDomains  = make(map[string]struct{})
+	blockedPatterns []string
 )
+
+// Check for pattern for filepath.Match
+func isPattern(s string) bool {
+	specialChars := "*?[]{}"
+	return strings.ContainsAny(s, specialChars)
+}
+
+func testDomain(domain string, list []string) bool {
+	for _, pattern := range list {
+		match, err := filepath.Match(pattern, domain)
+		if err != nil {
+			log.Fatalf("Pattern `%s` error:", pattern, err)
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
 
 // a.b.site.com   -> site.com
 // aboba.ru       -> aboba.ru
@@ -36,30 +58,7 @@ func trimDomain(domain string) string {
 	return strings.Join(lastTwo, ".")
 }
 
-func testDomain(domain string) bool {
-	proxyRequiredDomains := []string{
-		"youtube",
-		"ytimg.com",
-		"gstatic.com",
-		"google",
-		"ggpht.com",
-		"discord",
-		//
-		"casino",
-		"online",
-		"vavada",
-		"cloudfront",
-	}
-	for _, sub := range proxyRequiredDomains {
-		if strings.Contains(domain, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func readDomains(sources string, trim bool) (map[string]struct{}, int) {
-	result := make(map[string]struct{})
+func readDomains(sources string, fn func(domain string) bool) int {
 	counter := 0
 
 	for _, source := range strings.Split(sources, ";") {
@@ -85,22 +84,13 @@ func readDomains(sources string, trim bool) (map[string]struct{}, int) {
 			domain, _ = strings.CutPrefix(domain, "127.0.0.1 ")
 			domain = strings.TrimSpace(domain)
 			domain = strings.ToLower(domain)
-			if trim {
-				domain = trimDomain(domain)
-			}
 			if domain == "" {
 				continue
 			}
 			if domain[0] == '#' {
 				continue
 			}
-			if testDomain(domain) {
-				continue
-			}
-			if _, exists := result[domain]; !exists {
-				result[domain] = struct{}{}
-				counter++
-			}
+			fn(domain)
 		}
 
 		if err := scanner.Err(); err != nil {
@@ -108,5 +98,36 @@ func readDomains(sources string, trim bool) (map[string]struct{}, int) {
 		}
 	}
 
-	return result, counter
+	return counter
+}
+
+func addProxiedDomain(domain string) bool {
+	if testDomain(domain, proxiedPatterns) {
+		return false
+	}
+	if isPattern(domain) {
+		proxiedPatterns = append(proxiedPatterns, domain)
+		return true
+	}
+	domain = trimDomain(domain)
+	if _, exists := proxiedDomains[domain]; !exists {
+		proxiedDomains[domain] = struct{}{}
+		return true
+	}
+	return false
+}
+
+func addBlockedDomain(domain string) bool {
+	if testDomain(domain, blockedPatterns) {
+		return false
+	}
+	if isPattern(domain) {
+		blockedPatterns = append(blockedPatterns, domain)
+		return true
+	}
+	if _, exists := blockedDomains[domain]; !exists {
+		blockedDomains[domain] = struct{}{}
+		return true
+	}
+	return false
 }
