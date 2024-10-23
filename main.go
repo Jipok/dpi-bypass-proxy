@@ -157,9 +157,10 @@ func processPacket(packet []byte) int {
 		// Not a DNS-answer
 		return nfqueue.NfAccept // TODO or drop?
 	}
+	dnsResponse := parseDNSResponse(dnsPayload)
 
 	// Block?
-	for _, resolved := range parseDNSResponse(dnsPayload) {
+	for _, resolved := range dnsResponse {
 		_, blocked := blockedDomains[resolved.name]
 		if blocked || checkPatterns(resolved.name, blockedPatterns) != "" {
 			if blockIPset.Add(resolved.ip) && !*silent {
@@ -172,23 +173,25 @@ func processPacket(packet []byte) int {
 
 	// Proxy?
 	direct := true
-	for _, resolved := range parseDNSResponse(dnsPayload) {
+	for _, resolved := range dnsResponse {
 		trimmedDomain := trimDomain(resolved.name)
 		_, proxied := proxiedDomains[trimmedDomain]
-		if proxied || checkPatterns(trimmedDomain, proxiedPatterns) != "" {
+		if proxied || checkPatterns(resolved.name, proxiedPatterns) != "" {
 			direct = false
 			if proxyIPset.Add(resolved.ip) {
 				go addRoute(resolved.ip)
 				if !*silent {
 					log.Printf("New proxy route %s :: %v", resolved.name, resolved.ip)
 				}
+			} else if *verbose {
+				log.Printf("Old proxy route %s :: %v", resolved.name, resolved.ip)
 			}
 		}
 
 	}
 
 	if *verbose && direct {
-		for _, resolved := range parseDNSResponse(dnsPayload) {
+		for _, resolved := range dnsResponse {
 			log.Printf("Direct %s :: %v\n", resolved.name, resolved.ip)
 		}
 	}

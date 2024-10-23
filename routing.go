@@ -43,6 +43,7 @@ func setupRouting() {
 
 	runCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
+	runCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", *interfaceName))
 	log.Println(green("Routing setup completed"))
 }
@@ -50,6 +51,7 @@ func setupRouting() {
 func cleanupRouting() {
 	runCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
+	runCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", *interfaceName))
 
 	if !*noClear {
