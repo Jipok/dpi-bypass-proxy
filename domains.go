@@ -60,6 +60,7 @@ func checkPatterns(str string, list []string) string {
 // aboba.ru       -> aboba.ru
 // localhost      -> localhost
 // a.test.co.uk   -> test.co.uk
+// api.x.com      -> x.com
 // a.b.c.test.com -> test.com
 func trimDomain(domain string) string {
 	parts := strings.Split(domain, ".")
@@ -70,7 +71,7 @@ func trimDomain(domain string) string {
 	lastTwo := parts[len(parts)-2:]
 
 	// Если предпоследняя часть короче 3 символов (например, "co.uk"), берем три последние части
-	if len(lastTwo[0]) <= 2 {
+	if len(lastTwo[0]) <= 2 && !strings.HasSuffix(domain, ".x.com") {
 		if len(parts) >= 3 {
 			return strings.Join(parts[len(parts)-3:], ".")
 		}
