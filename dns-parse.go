@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 
@@ -74,12 +75,14 @@ func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 		return
 	}
 
-	// Пропускаем вопросы
+	// Question parsing
+	var requestedName string
 	for {
-		_, err := parser.Question()
+		qq, err := parser.Question()
 		if err == dnsmessage.ErrSectionDone {
 			break
 		}
+		requestedName = qq.Name.String()
 		if err != nil {
 			fmt.Println("Failed to parse Question:", err)
 			return
@@ -167,6 +170,10 @@ func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 				}
 			}
 		}
+	}
+
+	if args.Verbose && len(result) == 0 {
+		log.Print("Empty DNS-answer for ", requestedName)
 	}
 
 	return
