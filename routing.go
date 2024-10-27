@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 
 	"github.com/vishvananda/netlink"
 )
@@ -12,14 +11,6 @@ import (
 var (
 	link netlink.Link
 )
-
-func runCommand(cmd string) {
-	fmt.Println("  " + cmd)
-	output, err := exec.Command("sh", "-c", cmd).CombinedOutput()
-	if err != nil {
-		log.Fatalf(red("%v")+", output: %s \n", err, output)
-	}
-}
 
 func setupRouting() {
 	// Find collisions
@@ -40,20 +31,10 @@ func setupRouting() {
 	if len(proxyIPset.set) > 0 {
 		log.Printf(yellow("WARNING! ")+"found %d collisions in routes table! Will be treated as own.", len(proxyIPset.set))
 	}
-
-	runCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", args.Interface))
-	log.Println(green("Routing setup completed"))
+	// log.Println(green("Routing setup completed"))
 }
 
 func cleanupRouting() {
-	runCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", args.Interface))
-
 	if !args.NoClear {
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			LinkIndex: link.Attrs().Index,
@@ -79,7 +60,9 @@ func cleanupRouting() {
 		}
 	}
 
-	log.Println(green("Routing cleanup completed"))
+	if args.Interface != "" {
+		log.Println(green("Routing cleanup completed"))
+	}
 }
 
 func singleHostRoute(ip net.IP) *net.IPNet {

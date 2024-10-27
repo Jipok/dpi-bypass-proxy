@@ -4,13 +4,20 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/florianl/go-nfqueue"
 	nfNetlink "github.com/mdlayher/netlink"
 )
 
-// Set configuration options for nfqueue
+var (
+	blockIPset = NewIPv4Set(1000)
+	proxyIPset = NewIPv4Set(1000)
+	nf         *nfqueue.Nfqueue
+	nfCancel   context.CancelFunc
+)
+
 func setupNfqueue() {
 	config := nfqueue.Config{
 		NfQueue:      NFQUEUE,
@@ -20,12 +27,13 @@ func setupNfqueue() {
 		WriteTimeout: 15 * time.Millisecond,
 	}
 
-	nf, err := nfqueue.Open(&config)
+	var err error
+	nf, err = nfqueue.Open(&config)
 	if err != nil {
 		log.Fatal("could not open nfqueue socket:", err)
 		return
 	}
-	defer nf.Close()
+	// defer nf.Close()
 
 	// Avoid receiving ENOBUFS errors.
 	if err := nf.SetOption(nfNetlink.NoENOBUFS, true); err != nil {
@@ -34,8 +42,9 @@ func setupNfqueue() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	var ctx context.Context
+	ctx, nfCancel = context.WithCancel(context.Background())
+	// defer cancel()
 
 	fn := func(a nfqueue.Attribute) int {
 		id := *a.PacketID
@@ -50,6 +59,22 @@ func setupNfqueue() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	execCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	execCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	execCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	log.Printf(green("NFQUEUE `%d` successfully configured"), NFQUEUE)
+}
+
+func removeNfqueue() {
+	if nf != nil {
+		nfCancel()
+		nf.Close()
+	}
+	execCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	execCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	execCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
 }
 
 // processPacket обрабатывает перехваченный пакет

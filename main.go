@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/alexflint/go-arg"
@@ -13,8 +15,9 @@ import (
 )
 
 const (
-	GID     = 2354
-	NFQUEUE = 2034
+	GID            = 2354
+	NFQUEUE        = 2034
+	INTERFACE_NAME = "dnsr-wg"
 )
 
 type Args struct {
@@ -31,14 +34,23 @@ func (Args) Version() string {
 	return "dnsr 2.0.0"
 }
 
-var (
-	blockIPset = NewIPv4Set(1000)
-	proxyIPset = NewIPv4Set(1000)
-	args       Args
-)
+var args Args
 
 func main() {
 	arg.MustParse(&args)
+
+	// Validate
+	if args.WGConfig != "" && args.Interface != "" {
+		log.Fatal(red("Mutually exclusive options: use either config file or -i flag"))
+	}
+	if args.WGConfig == "" && args.Interface == "" {
+		println(red("Required: ") + "specify either WireGuard config file or existing interface with -i flag")
+		println("EXAMPLE:")
+		println(green("  sudo ./dnsr ~/my-wireguard.conf"))
+		println("OR")
+		println(green("  sudo ./dnsr --interface wg0"))
+		os.Exit(1)
+	}
 
 	if args.ProxyList == "proxy.lst" && !fileExists(args.ProxyList) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", args.ProxyList)
@@ -58,6 +70,11 @@ func main() {
 
 	if err := syscall.Setgid(GID); err != nil {
 		log.Fatalf(red("Can't change GID: %v\n"), err)
+	}
+
+	// Enable IP forwarding
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644); err != nil {
+		log.Fatalf(red("Failed to enable IP forwarding: %v"), err)
 	}
 
 	// Catch Ctrl-C
@@ -83,21 +100,43 @@ func main() {
 		fmt.Println("Silent mode, run without -s for verbose output")
 	}
 
+	// Check for existing interface
 	var err error
-	link, err = netlink.LinkByName(args.Interface)
-	if err != nil {
-		log.Fatalf(red("Error:")+" getting `%s` interface: %v", args.Interface, err)
+	link, err = netlink.LinkByName(INTERFACE_NAME)
+	if err == nil {
+		log.Print(yellow("An existing `dnsr-wg` interface was found, was the process terminated last time?"))
+		log.Print(yellow("We assume so. The interface will be removed and we will try to remove the iptables rules."))
+		removeWireguard()
+		removeNfqueue()
+		log.Print(green("It seems that everything was successfully cleaned up. Normal startup\n"))
 	}
 
-	// Setup iptables
+	// Configure interface
+	if args.WGConfig != "" {
+		setupWireguard()
+		defer removeWireguard()
+	} else {
+		link, err = netlink.LinkByName(args.Interface)
+		if err != nil {
+			log.Fatalf(red("Error:")+" getting `%s` interface: %v", args.Interface, err)
+		}
+		execCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", args.Interface))
+		log.Printf(green("Using `%s` interface"), args.Interface)
+	}
+
 	setupRouting()
 	defer cleanupRouting()
 
 	setupNfqueue()
+	defer removeNfqueue()
 
 	fmt.Println("====================")
 	<-sigChan
 	log.Println("Shutting down...")
+
+	if args.Interface != "" {
+		execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", args.Interface))
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -117,4 +156,18 @@ func yellow(str string) string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
+}
+
+func execCommand(cmdargs ...string) {
+	cmd := strings.Join(cmdargs, " ")
+	if args.Verbose {
+		fmt.Println(yellow("EXEC") + "  " + cmd)
+	}
+	output, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	if err != nil {
+		if !args.Verbose {
+			fmt.Println(yellow("EXEC") + "  " + cmd)
+		}
+		log.Fatalf(red("%v")+", output: %s \n", err, output)
+	}
 }
