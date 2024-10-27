@@ -69,16 +69,14 @@ func extractDNSPayload(packet []byte) ([]byte, error) {
 func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 	var parser dnsmessage.Parser
 
-	// Начинаем парсинг DNS сообщения
 	if _, err := parser.Start(dnsPayload); err != nil {
 		fmt.Println("Failed to parse DNS message:", err)
 		return
 	}
 
-	// Пропускаем вопросы (Questions)
+	// Пропускаем вопросы
 	for {
 		_, err := parser.Question()
-		// qq.Name TODO CNAME?
 		if err == dnsmessage.ErrSectionDone {
 			break
 		}
@@ -88,7 +86,14 @@ func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 		}
 	}
 
-	// Читаем ответы (Answers)
+	// Карта для отслеживания CNAME цепочек
+	cnameMap := make(map[string]string)
+	// Карта для хранения IP адресов, связанных с именами
+	ipMap := make(map[string][]net.IP)
+	// Список для сбора всех имен, которые нужно обработать
+	var names []string
+
+	// Первый проход - собираем все ответы
 	for {
 		rr, err := parser.Answer()
 		if err == dnsmessage.ErrSectionDone {
@@ -99,21 +104,70 @@ func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 			return
 		}
 
-		domainName := rr.Header.Name.String()
-		domainName = strings.ToLower(domainName)
-		domainName, _ = strings.CutSuffix(domainName, ".")
+		name := strings.ToLower(strings.TrimSuffix(rr.Header.Name.String(), "."))
 
 		switch rr.Header.Type {
-		case dnsmessage.TypeAAAA:
-			// fallthrough          IPv6 disabled
+		case dnsmessage.TypeCNAME:
+			if cname, ok := rr.Body.(*dnsmessage.CNAMEResource); ok {
+				target := strings.ToLower(strings.TrimSuffix(cname.CNAME.String(), "."))
+				cnameMap[name] = target
+				// Добавляем имя в список для обработки
+				names = append(names, name)
+			}
 		case dnsmessage.TypeA:
 			if aBody, ok := rr.Body.(*dnsmessage.AResource); ok {
-				pair := ResolvedName{domainName, net.IP(aBody.A[:])}
-				result = append(result, pair)
+				ipMap[name] = append(ipMap[name], net.IP(aBody.A[:]))
+				// Добавляем имя в список для обработки, если еще не добавлено
+				if _, exists := cnameMap[name]; !exists {
+					names = append(names, name)
+				}
 			}
-		default:
-			// Обрабатываем другие типы записей при необходимости
 		}
 	}
+
+	// Функция для разворачивания CNAME цепочки и получения конечного имени
+	resolveCNAME := func(name string) string {
+		for {
+			target, exists := cnameMap[name]
+			if !exists {
+				break
+			}
+			name = target
+		}
+		return name
+	}
+
+	// Множество для отслеживания уже обработанных пар (имя, IP)
+	seen := make(map[string]struct{})
+
+	// Проходим по всем собранным именам и сопоставляем их с IP
+	for _, name := range names {
+		finalName := resolveCNAME(name)
+		ips, exists := ipMap[finalName]
+		if !exists {
+			continue
+		}
+		// Собираем всю цепочку имен от исходного до конечного
+		chain := []string{name}
+		for {
+			target, exists := cnameMap[name]
+			if !exists || target == name {
+				break
+			}
+			chain = append(chain, target)
+			name = target
+		}
+		// Для каждого имени в цепочке добавляем все связанные IP адреса
+		for _, cname := range chain {
+			for _, ip := range ips {
+				key := cname + ip.String()
+				if _, processed := seen[key]; !processed {
+					result = append(result, ResolvedName{cname, ip})
+					seen[key] = struct{}{}
+				}
+			}
+		}
+	}
+
 	return
 }
