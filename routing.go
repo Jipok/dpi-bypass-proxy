@@ -44,7 +44,7 @@ func setupRouting() {
 	runCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", *interfaceName))
+	runCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", args.Interface))
 	log.Println(green("Routing setup completed"))
 }
 
@@ -52,9 +52,9 @@ func cleanupRouting() {
 	runCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 2034")
 	runCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num 2034")
-	runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", *interfaceName))
+	runCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", args.Interface))
 
-	if !*noClear {
+	if !args.NoClear {
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Table:     0,

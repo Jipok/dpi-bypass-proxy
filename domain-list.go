@@ -126,7 +126,7 @@ func readDomains(sources string, fn func(domain string)) {
 func addProxiedDomain(domain string) {
 	pattern := checkPatterns(domain, proxiedPatterns)
 	if pattern != "" {
-		if *verbose {
+		if args.Verbose {
 			fmt.Printf("PROXY: %s  ==  %s\n", pattern, domain)
 		}
 		return
@@ -144,7 +144,7 @@ func addProxiedDomain(domain string) {
 func addBlockedDomain(domain string) {
 	pattern := checkPatterns(domain, blockedPatterns)
 	if pattern != "" {
-		if *verbose {
+		if args.Verbose {
 			fmt.Printf("BLOCK: %s  ==  %s\n", pattern, domain)
 		}
 		return
