@@ -31,10 +31,6 @@ func (Args) Version() string {
 	return "dnsr 2.0.0"
 }
 
-func (Args) Description() string {
-	return "Monitors DNS responses and creates routing rules to route traffic through specified interface for domains from proxy list"
-}
-
 var (
 	blockIPset = NewIPv4Set(1000)
 	proxyIPset = NewIPv4Set(1000)
@@ -44,27 +40,24 @@ var (
 func main() {
 	arg.MustParse(&args)
 
-	if os.Getuid() != 0 {
-		log.Fatal(red("Must be run as root"))
-	}
-
-	// test()
-
-	if err := syscall.Setgid(GID); err != nil {
-		log.Fatalf(red("Can't change GID: %v\n"), err)
-	}
-
 	if args.ProxyList == "proxy.lst" && !fileExists(args.ProxyList) {
 		fmt.Printf(red("Error:")+" The proxy list file '%s' does not exist.\n", args.ProxyList)
-		fmt.Println("To download a sample proxy list, you can use the following command:")
+		fmt.Println("To download a good proxy list, you can use the following command:")
 		fmt.Println(green("  wget https://github.com/1andrevich/Re-filter-lists/raw/refs/heads/main/domains_all.lst -O proxy.lst"))
 		os.Exit(1)
 	}
 	if args.BlockList == "blocks.lst" && !fileExists(args.BlockList) {
-		fmt.Printf(red("Error:")+" The block list file '%s' does not exist.\n", args.BlockList)
+		fmt.Printf(yellow("Warning:")+" The block list file '%s' does not exist.\n", args.BlockList)
 		fmt.Println("To download a sample block list, you can use the following command:")
-		fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst"))
-		os.Exit(1)
+		fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst\n"))
+	}
+
+	if os.Getuid() != 0 {
+		log.Fatal(red("Must be run as root"))
+	}
+
+	if err := syscall.Setgid(GID); err != nil {
+		log.Fatalf(red("Can't change GID: %v\n"), err)
 	}
 
 	// Catch Ctrl-C
@@ -76,9 +69,11 @@ func main() {
 	log.Printf("Proxies %d top-level domains, %d globs\n", len(proxiedDomains), len(proxiedPatterns))
 	runtime.GC()
 
-	readDomains(args.BlockList, addBlockedDomain)
-	log.Printf("Block %d domains, %d globs\n", len(blockedDomains), len(blockedPatterns))
-	runtime.GC()
+	if fileExists(args.BlockList) {
+		readDomains(args.BlockList, addBlockedDomain)
+		log.Printf("Block %d domains, %d globs\n", len(blockedDomains), len(blockedPatterns))
+		runtime.GC()
+	}
 
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -98,10 +93,14 @@ func main() {
 	setupRouting()
 	defer cleanupRouting()
 
+	setupNfqueue()
+
 	fmt.Println("====================")
 	<-sigChan
 	log.Println("Shutting down...")
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 func red(str string) string {
 	return "\033[31m" + str + "\033[0m"

@@ -1,4 +1,4 @@
-module dpi-bypass-proxy
+module dnsr
 
 go 1.22.5
 

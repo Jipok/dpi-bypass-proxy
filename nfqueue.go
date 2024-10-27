@@ -10,8 +10,8 @@ import (
 	nfNetlink "github.com/mdlayher/netlink"
 )
 
+// Set configuration options for nfqueue
 func setupNfqueue() {
-	// Set configuration options for nfqueue
 	config := nfqueue.Config{
 		NfQueue:      NFQUEUE,
 		MaxPacketLen: 0xFFFF,
@@ -89,14 +89,13 @@ func processPacket(packet []byte) int {
 				log.Printf("Old proxy route %s :: %v", resolved.name, resolved.ip)
 			}
 		}
-
 	}
 
+	// Direct
 	if args.Verbose && direct {
 		for _, resolved := range dnsResponse {
 			log.Printf("Direct %s :: %v\n", resolved.name, resolved.ip)
 		}
 	}
-
 	return nfqueue.NfAccept
 }
