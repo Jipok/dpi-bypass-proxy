@@ -6,21 +6,20 @@
 > - Better performance and reliability, especially on routers
 > - If you need SOCKS5 proxy support, use old [v3 release](https://github.com/Jipok/dpi-bypass-proxy/releases/tag/3.0.0)
 
-A tool that automatically routes traffic through VPN or any other network interface based on DNS responses. Designed to bypass DPI blocks and throttling while keeping other traffic direct. Works on both Linux PCs and **routers**.
+A simple yet powerful tool that automatically routes your traffic through VPN for blocked websites while keeping everything else direct. Just download, run, and enjoy unrestricted internet access! Perfect for both personal computers and **routers**.
 
 ## Key Features
 
-- Bypasses DPI blocks and throttling for specified domains
-- Works on Linux PCs and routers (OpenWrt, etc.)
-- Selective domain routing through any network interface
-- Built-in WireGuard support (can automatically set up from config)
-- Support for OpenVPN, WireGuard, or any other network interface
-- DNS-based traffic analysis and routing
-- Domain blocking capability
-- Automatically cleans up routes and rules on exit
-- Memory-efficient domain matching with glob pattern support
+- ✨ **Simple to Use**: Download and run - that's it!
+- 🌐 **Universal**: Works on both Linux PCs and routers (OpenWrt)
+- 🚀 **Smart Routing**: Only routes specified websites through VPN, keeping other traffic direct
+- ⚡ Lightweight: Minimal resource usage with maximum efficiency
+- 🔧 Built-in WireGuard support (can automatically set up from config)
+- 🛡️ Optional domain blocking
+- 🔄 Auto-cleanup on exit
+- 📝 Support for OpenVPN, WireGuard, or any other network interface
 
-## Usage
+## Quick Start (2 Minutes Setup)
 
 1. Download the [latest release](https://github.com/Jipok/dpi-bypass-proxy/releases/latest) or build from source
 2. Prepare your domain lists:
@@ -41,6 +40,8 @@ A tool that automatically routes traffic through VPN or any other network interf
    sudo ./dnsr --interface tun0    # OpenVPN interface
    sudo ./dnsr --interface wg0     # WireGuard interface
    ```
+
+That's it! DNSR automatically handles everything else.
 
 ### Command Line Options
 
