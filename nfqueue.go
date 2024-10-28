@@ -12,7 +12,6 @@ import (
 )
 
 var (
-	blockIPset = NewIPv4Set(1000)
 	proxyIPset = NewIPv4Set(1000)
 	nf         *nfqueue.Nfqueue
 	nfCancel   context.CancelFunc
@@ -79,48 +78,49 @@ func removeNfqueue() {
 
 // processPacket обрабатывает перехваченный пакет
 func processPacket(packet []byte) int {
-	dnsPayload, err := extractDNSPayload(packet)
+	dnsPayload, err := extractUdpPayload(packet)
 	if err != nil {
 		// Not a DNS-answer
+		if args.Verbose {
+			log.Printf("Received bad DNS-package")
+		}
 		return nfqueue.NfAccept // TODO or drop?
 	}
 	dnsResponse := parseDNSResponse(dnsPayload)
 
 	// Block?
-	for _, resolved := range dnsResponse {
-		_, blocked := blockedDomains[resolved.name]
-		if blocked || checkPatterns(resolved.name, blockedPatterns) != "" {
-			if blockIPset.Add(resolved.ip) && !args.Silent {
-				log.Printf("Blocking DNS-answer for %s", resolved.name)
+	for name, _ := range dnsResponse {
+		_, blocked := blockedDomains[name]
+		if blocked || checkPatterns(name, blockedPatterns) != "" {
+			if args.Verbose {
+				log.Printf("Blocking DNS-answer for %s", name)
 			}
 			return nfqueue.NfDrop
 		}
 
 	}
 
-	// Proxy?
-	direct := true
-	for _, resolved := range dnsResponse {
-		trimmedDomain := trimDomain(resolved.name)
+	for name, ipList := range dnsResponse {
+		trimmedDomain := trimDomain(name)
 		_, proxied := proxiedDomains[trimmedDomain]
-		if proxied || checkPatterns(resolved.name, proxiedPatterns) != "" {
-			direct = false
-			if proxyIPset.Add(resolved.ip) {
-				go addRoute(resolved.ip)
-				if !args.Silent {
-					log.Printf("New proxy route %s :: %v", resolved.name, resolved.ip)
+		// Proxy?
+		if proxied || checkPatterns(name, proxiedPatterns) != "" {
+			for _, ip := range ipList {
+				if proxyIPset.Add(ip) {
+					go addRoute(ip)
+					if !args.Silent {
+						log.Printf("New proxy route %s :: %v", name, ip)
+					}
+				} else if args.Verbose {
+					log.Printf("Old proxy route %s :: %v", name, ip)
 				}
-			} else if args.Verbose {
-				log.Printf("Old proxy route %s :: %v", resolved.name, resolved.ip)
+			}
+		} else { // Direct
+			if args.Verbose {
+				log.Printf("Direct %s :: %v\n", name, ipList)
 			}
 		}
 	}
 
-	// Direct
-	if args.Verbose && direct {
-		for _, resolved := range dnsResponse {
-			log.Printf("Direct %s :: %v\n", resolved.name, resolved.ip)
-		}
-	}
 	return nfqueue.NfAccept
 }

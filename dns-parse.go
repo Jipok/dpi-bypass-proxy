@@ -15,8 +15,8 @@ type ResolvedName struct {
 	ip   net.IP
 }
 
-// extractDNSPayload извлекает DNS полезную нагрузку из IP пакета
-func extractDNSPayload(packet []byte) ([]byte, error) {
+// extractUDPayload извлекает полезную нагрузку из IP пакета
+func extractUdpPayload(packet []byte) ([]byte, error) {
 	if len(packet) < 20 {
 		return nil, fmt.Errorf("packet too short for IPv4 header")
 	}
@@ -66,13 +66,13 @@ func extractDNSPayload(packet []byte) ([]byte, error) {
 	return dnsPayload, nil
 }
 
-// parseDNSResponse парсит DNS ответ и выводит доменное имя и IP адреса
-func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
+func parseDNSResponse(dnsPayload []byte) map[string][]net.IP {
+	result := make(map[string][]net.IP)
 	var parser dnsmessage.Parser
 
 	if _, err := parser.Start(dnsPayload); err != nil {
 		fmt.Println("Failed to parse DNS message:", err)
-		return
+		return result
 	}
 
 	// Question parsing
@@ -85,96 +85,51 @@ func parseDNSResponse(dnsPayload []byte) (result []ResolvedName) {
 		requestedName = qq.Name.String()
 		if err != nil {
 			fmt.Println("Failed to parse Question:", err)
-			return
+			return result
 		}
 	}
 
-	// Карта для отслеживания CNAME цепочек
+	// Store all answers to process them later
+	answers, err := parser.AllAnswers()
+	if err != nil {
+		fmt.Println("Failed to parse DNSAnswers:", err)
+		return result
+	}
+
+	// First collect all CNAME records
 	cnameMap := make(map[string]string)
-	// Карта для хранения IP адресов, связанных с именами
-	ipMap := make(map[string][]net.IP)
-	// Список для сбора всех имен, которые нужно обработать
-	var names []string
-
-	// Первый проход - собираем все ответы
-	for {
-		rr, err := parser.Answer()
-		if err == dnsmessage.ErrSectionDone {
-			break
-		}
-		if err != nil {
-			fmt.Println("Failed to parse Answer:", err)
-			return
-		}
-
-		name := strings.ToLower(strings.TrimSuffix(rr.Header.Name.String(), "."))
-
-		switch rr.Header.Type {
-		case dnsmessage.TypeCNAME:
+	for _, rr := range answers {
+		if rr.Header.Type == dnsmessage.TypeCNAME {
 			if cname, ok := rr.Body.(*dnsmessage.CNAMEResource); ok {
+				name := strings.ToLower(strings.TrimSuffix(rr.Header.Name.String(), "."))
 				target := strings.ToLower(strings.TrimSuffix(cname.CNAME.String(), "."))
 				cnameMap[name] = target
-				// Добавляем имя в список для обработки
-				names = append(names, name)
-			}
-		case dnsmessage.TypeA:
-			if aBody, ok := rr.Body.(*dnsmessage.AResource); ok {
-				ipMap[name] = append(ipMap[name], net.IP(aBody.A[:]))
-				// Добавляем имя в список для обработки, если еще не добавлено
-				if _, exists := cnameMap[name]; !exists {
-					names = append(names, name)
-				}
 			}
 		}
 	}
 
-	// Функция для разворачивания CNAME цепочки и получения конечного имени
-	resolveCNAME := func(name string) string {
-		for {
-			target, exists := cnameMap[name]
-			if !exists {
-				break
-			}
-			name = target
-		}
-		return name
-	}
+	// Then process A records
+	for _, rr := range answers {
+		if rr.Header.Type == dnsmessage.TypeA {
+			if a, ok := rr.Body.(*dnsmessage.AResource); ok {
+				name := strings.ToLower(strings.TrimSuffix(rr.Header.Name.String(), "."))
+				ip := net.IP(a.A[:])
 
-	// Множество для отслеживания уже обработанных пар (имя, IP)
-	seen := make(map[string]struct{})
+				// Add IP to the original name
+				result[name] = append(result[name], ip)
 
-	// Проходим по всем собранным именам и сопоставляем их с IP
-	for _, name := range names {
-		finalName := resolveCNAME(name)
-		ips, exists := ipMap[finalName]
-		if !exists {
-			continue
-		}
-		// Собираем всю цепочку имен от исходного до конечного
-		chain := []string{name}
-		for {
-			target, exists := cnameMap[name]
-			if !exists || target == name {
-				break
-			}
-			chain = append(chain, target)
-			name = target
-		}
-		// Для каждого имени в цепочке добавляем все связанные IP адреса
-		for _, cname := range chain {
-			for _, ip := range ips {
-				key := cname + ip.String()
-				if _, processed := seen[key]; !processed {
-					result = append(result, ResolvedName{cname, ip})
-					seen[key] = struct{}{}
+				// Follow and add to all CNAME references
+				for source, target := range cnameMap {
+					if target == name {
+						result[source] = append(result[source], ip)
+					}
 				}
 			}
 		}
 	}
 
 	if args.Verbose && len(result) == 0 {
-		log.Print("Empty DNS-answer for ", requestedName)
+		log.Print("Empty/Useless DNS-answer for ", requestedName)
 	}
-
-	return
+	return result
 }
