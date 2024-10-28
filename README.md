@@ -22,7 +22,7 @@ A tool that automatically routes traffic through VPN or any other network interf
 
 ## Usage
 
-1. Download the latest release or build from source
+1. Download the [latest release](https://github.com/Jipok/dpi-bypass-proxy/releases/latest) or build from source
 2. Prepare your domain lists:
    ```bash
    # For proxy list (recommended)
@@ -74,11 +74,3 @@ Example: proxy1.lst;proxy2.lst;proxy3.lst
    - Directs matching traffic through specified interface
 3. All other traffic continues to use the default route
 4. Domains in the block list are dropped
-
-## Requirements
-
-- Linux with NFQUEUE support
-- Root privileges
-- Either:
-  - WireGuard config for automatic setup
-  - Or any existing network interface (OpenVPN, WireGuard, etc.)

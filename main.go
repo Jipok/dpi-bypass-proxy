@@ -66,6 +66,15 @@ func main() {
 		fmt.Println(green("  wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst\n"))
 	}
 
+	if args.PresetIPs == "" && !args.Silent {
+		log.Print(yellow("Notice: Consider routing your DNS server's IP through VPN too."))
+		log.Print(yellow("Your ISP might block websites by manipulating DNS responses."))
+		log.Print(yellow("You can add DNS server IPs to a file and use --preset-ips option, for example:"))
+		log.Print("  echo '8.8.8.8\\n1.1.1.1' > dns-ips.txt")
+		log.Print("  sudo ./dnsr --preset-ips dns-ips.txt /etc/wireguard/wg0.conf")
+		log.Print("")
+	}
+
 	if os.Getuid() != 0 {
 		log.Fatal(red("Must be run as root"))
 	}
