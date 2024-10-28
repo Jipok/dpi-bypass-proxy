@@ -1,78 +1,76 @@
-# DPI Bypass Proxy
+# DNSR (DNS Router)
 
-A Go-based proxy tool that redirects blocked or throttled domains through a user-specified SOCKS5 proxy while allowing direct connections for all other traffic. This tool is designed to work on both Linux PCs and routers.
+A tool that automatically routes traffic through VPN or any other network interface based on DNS responses. Designed to bypass DPI blocks and throttling while keeping other traffic direct. Works on both Linux PCs and **routers**.
 
-![image](https://github.com/user-attachments/assets/f772e8a4-f3f2-499f-8c6b-5d7d414b6592)
+![Network routing diagram placeholder]
 
-## Features
+## Key Features
 
-- Redirects blocked or DPI-throttled domains through a proxy
-- Support SOCKS5 proxy or sending though net interface(like wg0)
-- Allows direct connections for non-blocked domains
-- Configurable proxy list and block list
-- Works on Linux PCs and **routers**
-- Uses nftables/iptables for transparent proxying
+- Bypasses DPI blocks and throttling for specified domains
+- Works on Linux PCs and routers (OpenWrt, etc.)
+- Selective domain routing through any network interface
+- Built-in WireGuard support (can automatically set up from config)
+- Support for OpenVPN, WireGuard, or any other network interface
+- DNS-based traffic analysis and routing
+- Domain blocking capability
+- Automatically cleans up routes and rules on exit
+- Memory-efficient domain matching with glob pattern support
 
 ## Usage
 
-1. Download the appropriate binary for your system from the [Releases](https://github.com/Jipok/dpi-bypass-proxy/releases) page.
-
-2. Run the binary with root privileges:
-
+1. Download the latest release or build from source
+2. Prepare your domain lists:
+   ```bash
+   # For proxy list (recommended)
+   wget https://github.com/1andrevich/Re-filter-lists/raw/refs/heads/main/domains_all.lst -O proxy.lst
+   
+   # For block list (optional)
+   wget https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts -O blocks.lst
    ```
-   sudo ./dpi-bypass-proxy [flags]
+
+3. Run with either a WireGuard config or existing interface:
+   ```bash
+   # Using WireGuard config (automatic setup)
+   sudo ./dnsr ~/my-wireguard.conf
+   
+   # Or using any existing network interface
+   sudo ./dnsr --interface tun0    # OpenVPN interface
+   sudo ./dnsr --interface wg0     # WireGuard interface
    ```
 
-   Common flags:
-   - `-socks5`: SOCKS5 proxy address (default: "127.0.0.1:1080")
-   - `-interface`: Network interface to use for proxyList domains, ignores `-socks5`
-   - `-proxyList`: File with list of domains to proxy (recommended: [antifilter domains.lst](https://antifilter.download/list/domains.lst))
-   - `-blockList`: File with list of domains to BLOCK (recommended: [StevenBlack/hosts](https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts))
-   - `-v`: Print all dials (verbose mode)
+### Command Line Options
 
-3. The tool will set up iptables rules and start redirecting traffic as configured.
+```
+Usage: dnsr [--interface INTERFACE] [--proxy-list PROXY-LIST] [--block-list BLOCK-LIST] 
+           [--silent] [--verbose] [--no-clear] [WG-CONFIG]
+
+Positional arguments:
+  WG-CONFIG             Path to WireGuard configuration file (optional)
+
+Options:
+  --interface, -i      Use existing network interface (OpenVPN, WireGuard, etc.)
+  --proxy-list         Domains to route through specified interface [default: proxy.lst]
+  --block-list         Domains to block [default: blocks.lst]
+  --silent, -s         Don't show when new routes are added
+  --verbose, -v        Enable verbose output
+  --persistent, -p     Keep WireGuard interface (if created) and routes after exit
+  --help, -h           Show this help message
+  --version            Show version
+```
 
 ## How It Works
 
-1. The tool sets up iptables rules to redirect incoming HTTPS traffic (port 443) to itself.
-2. It reads the server name from the TLS ClientHello message.
-3. If the domain is in the block list, the connection is dropped.
-4. If the domain is in the proxy list, it's redirected through the SOCKS5 proxy.
-5. All other connections are handled directly.
+1. The tool monitors DNS responses using NFQUEUE
+2. When a domain from the proxy list is resolved:
+   - Creates specific routes for the resolved IP addresses
+   - Directs matching traffic through specified interface
+3. All other traffic continues to use the default route
+4. Domains in the block list are dropped
 
+## Requirements
 
-- Requires root privileges to set up nf/iptables rules
-- Cleans up iptables rules on exit
-- After start the tool sets GID to 2354
-- `-proxyList` and `-blockList` accepts a semicolon-separated list of files. Like `proxy.lst; my.txt`
-
-
-## Wireguard
-By default, when you start Wireguard using the `wg-quick up` command, it configures the system to route all traffic through the Wireguard tunnel. This can interfere with dpi-bypass-proxy's operation, as it won't be able to control which traffic should go through the proxy and which should go directly.
-
-To use dpi-bypass-proxy together with Wireguard:
-
-1. Add the line `Table = off` to the `[Interface]` section of your Wireguard configuration file. For example:
-
-   ```
-   [Interface]
-   PrivateKey = your_private_key
-   Address = 10.0.0.2/24
-   Table = off
-   ```
-
-   This prevents automatic routing of all traffic through Wireguard.
-
-2. Start Wireguard:
-
-   ```
-   sudo wg-quick up wg0
-   ```
-
-3. Now run dpi-bypass-proxy, specifying the Wireguard interface using the `-interface` flag:
-
-   ```
-   sudo ./dpi-bypass-proxy -interface wg0
-   ```
-
-This way, dpi-bypass-proxy will use Wireguard only for domains in the proxy list, while the rest of the traffic will go directly. This allows for more flexible control over which traffic goes through the VPN and which doesn't.
+- Linux with NFQUEUE support
+- Root privileges
+- Either:
+  - WireGuard config for automatic setup
+  - Or any existing network interface (OpenVPN, WireGuard, etc.)
