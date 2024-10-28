@@ -1,8 +1,12 @@
 # DNSR (DNS Router)
 
-A tool that automatically routes traffic through VPN or any other network interface based on DNS responses. Designed to bypass DPI blocks and throttling while keeping other traffic direct. Works on both Linux PCs and **routers**.
+> [!NOTE]
+> **Major Update (4.0)**: 
+> - Now uses DNS-based routing instead of transparent proxy
+> - Better performance and reliability, especially on routers
+> - If you need SOCKS5 proxy support, use old [v3 release](https://github.com/Jipok/dpi-bypass-proxy/releases/tag/3.0.0)
 
-![Network routing diagram placeholder]
+A tool that automatically routes traffic through VPN or any other network interface based on DNS responses. Designed to bypass DPI blocks and throttling while keeping other traffic direct. Works on both Linux PCs and **routers**.
 
 ## Key Features
 

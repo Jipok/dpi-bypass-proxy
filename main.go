@@ -33,7 +33,7 @@ type Args struct {
 }
 
 func (Args) Version() string {
-	return "dnsr 2.0.0"
+	return "dnsr 4.0.0"
 }
 
 var args Args
