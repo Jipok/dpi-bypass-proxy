@@ -120,7 +120,6 @@ func readDomains(sources string, fn func(domain string)) {
 			log.Fatalf(red("Error")+" reading file %s: %v", source, err)
 		}
 	}
-
 }
 
 func addProxiedDomain(domain string) {
