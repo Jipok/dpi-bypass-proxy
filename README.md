@@ -22,7 +22,7 @@ A tool that automatically routes traffic through VPN or any other network interf
 
 ## Usage
 
-1. Download the latest release or build from source
+1. Download the [latest release](https://github.com/Jipok/dpi-bypass-proxy/releases/latest) or build from source
 2. Prepare your domain lists:
    ```bash
    # For proxy list (recommended)
