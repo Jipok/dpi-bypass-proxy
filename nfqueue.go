@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/florianl/go-nfqueue"
@@ -70,10 +72,19 @@ func removeNfqueue() {
 		nfCancel()
 		nf.Close()
 	}
-	execCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-	execCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-	execCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-	log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
+	output, err := exec.Command("sh", "-c", "iptables -L -n -v").Output()
+	if err == nil {
+		if strings.Contains(string(output), "NFQUEUE num "+strconv.Itoa(NFQUEUE)) {
+			execCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+			execCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+			execCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+			log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
+			return
+		}
+		log.Printf("NFQUEUE `%d` not found, nothing cleanup", NFQUEUE)
+	} else {
+		log.Fatal(err)
+	}
 }
 
 // processPacket обрабатывает перехваченный пакет
