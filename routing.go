@@ -35,7 +35,7 @@ func setupRouting() {
 }
 
 func cleanupRouting() {
-	if !args.NoClear {
+	if !args.Persistent {
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Table:     0,
@@ -54,14 +54,11 @@ func cleanupRouting() {
 				proxyIPset.Add(route.Dst.IP)
 			}
 		}
+		log.Println(green("Routing cleanup completed"))
 	} else {
 		if len(proxyIPset.set) > 0 {
 			fmt.Printf(yellow("There are %d entries in the routing table, there will be no cleaning.\n"), len(proxyIPset.set))
 		}
-	}
-
-	if args.Interface != "" {
-		log.Println(green("Routing cleanup completed"))
 	}
 }
 
@@ -101,6 +98,6 @@ func delRoute(ip net.IP) {
 	}
 	err := netlink.RouteDel(newRoute)
 	if err != nil {
-		log.Printf(red("Error:")+" adding route: %v", err)
+		log.Printf(red("Error:")+" deleting route: %v", err)
 	}
 }

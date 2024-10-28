@@ -23,11 +23,13 @@ const (
 type Args struct {
 	WGConfig  string `arg:"positional" help:"Path to WireGuard configuration file"`
 	Interface string `arg:"-i,--interface" help:"Use existing WireGuard interface instead of creating new one from config"`
-	ProxyList string `arg:"-p,--proxy-list" default:"proxy.lst" help:"File with list of domains to proxy through WireGuard(or specified interface)"`
-	BlockList string `arg:"-b,--block-list" default:"blocks.lst" help:"File with list of domains to block completely"`
-	Silent    bool   `arg:"-s,--silent" help:"Suppress output of new DNS entries"`
-	Verbose   bool   `arg:"-v,--verbose" help:"Enable verbose output for all DNS-answers"`
-	NoClear   bool   `arg:"--no-clear" help:"Do not clear routing table on program exit"`
+	ProxyList string `arg:"--proxy-list" default:"proxy.lst" help:"File with list of domains to proxy through WireGuard(or specified interface)"`
+	BlockList string `arg:"--block-list" default:"blocks.lst" help:"File with list of domains to block completely"`
+	// IpList     string ``
+	Force      bool `arg:"-f,--force" help:"Force remove existing dnsr-wg interface and create new one"`
+	Silent     bool `arg:"-s,--silent" help:"Don't show when new routes are added"`
+	Verbose    bool `arg:"-v,--verbose" help:"Enable verbose output for all DNS-answers"`
+	Persistent bool `arg:"-p,--persistent" help:"Keep WireGuard interface (if created) and routes after exit"`
 }
 
 func (Args) Version() string {
@@ -103,18 +105,28 @@ func main() {
 	// Check for existing interface
 	var err error
 	link, err = netlink.LinkByName(INTERFACE_NAME)
-	if err == nil {
-		log.Print(yellow("An existing `dnsr-wg` interface was found, was the process terminated last time?"))
-		log.Print(yellow("We assume so. The interface will be removed and we will try to remove the iptables rules."))
-		removeWireguard()
-		removeNfqueue()
-		log.Print(green("It seems that everything was successfully cleaned up. Normal startup\n"))
+	if err == nil && args.Interface != INTERFACE_NAME {
+		log.Print(yellow("An existing `dnsr-wg` interface was found."))
+		log.Print(yellow("This could be because:"))
+		log.Print(yellow(" - Previous process was terminated incorrectly"))
+		log.Print(yellow(" - Interface was preserved with --persistent flag"))
+		if args.Force {
+			log.Print("Removing existing interface as --force flag is set")
+			removeWireguard(true)
+			removeNfqueue()
+			log.Print(green("Cleanup completed. Proceeding with normal startup\n"))
+		} else {
+			log.Print(red("To proceed, either:"))
+			log.Print(" - Use --force to remove existing interface and create new one")
+			log.Print(" - Use -i dnsr-wg to use existing interface")
+			log.Fatal(" - Or manually remove interface with: ip link delete dnsr-wg")
+		}
 	}
 
 	// Configure interface
 	if args.WGConfig != "" {
 		setupWireguard()
-		defer removeWireguard()
+		defer removeWireguard(false)
 	} else {
 		link, err = netlink.LinkByName(args.Interface)
 		if err != nil {
