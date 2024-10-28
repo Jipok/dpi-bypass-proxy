@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 )
@@ -31,7 +34,52 @@ func setupRouting() {
 	if len(proxyIPset.set) > 0 {
 		log.Printf(yellow("WARNING! ")+"found %d collisions in routes table! Will be treated as own.", len(proxyIPset.set))
 	}
-	// log.Println(green("Routing setup completed"))
+
+	// Load user preset
+	count := 0
+	for _, source := range strings.Split(args.PresetIPs, ";") {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			continue
+		}
+		file, err := os.Open(source)
+		if err != nil {
+			log.Fatalf(red("Error")+" opening file %s: %v", source, err)
+			continue
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Remove comment
+			if idx := strings.Index(line, "#"); idx != -1 {
+				line = line[:idx]
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// Parse IP
+			ip := net.ParseIP(line)
+			if ip == nil {
+				log.Printf(yellow("Can't parse line in %s: ")+"%s", source, line)
+				continue
+			}
+			if addRoute(ip) {
+				count++
+			} else {
+				log.Printf(yellow("  %s"), ip.String())
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Fatalf(red("Error")+" reading file %s: %v", source, err)
+		}
+	}
+
+	if args.PresetIPs != "" {
+		log.Printf("Routing %d preset IP addresses", count)
+	}
 }
 
 func cleanupRouting() {
@@ -75,8 +123,7 @@ func singleHostRoute(ip net.IP) *net.IPNet {
 	}
 }
 
-func addRoute(ip net.IP) {
-	ip.DefaultMask()
+func addRoute(ip net.IP) bool {
 	newRoute := &netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Scope:     netlink.SCOPE_UNIVERSE,
@@ -86,7 +133,9 @@ func addRoute(ip net.IP) {
 	err := netlink.RouteAdd(newRoute)
 	if err != nil {
 		log.Printf(red("Error:")+" adding route: %v", err)
+		return false
 	}
+	return true
 }
 
 func delRoute(ip net.IP) {

@@ -21,15 +21,15 @@ const (
 )
 
 type Args struct {
-	WGConfig  string `arg:"positional" help:"Path to WireGuard configuration file"`
-	Interface string `arg:"-i,--interface" help:"Use existing WireGuard interface instead of creating new one from config"`
-	ProxyList string `arg:"--proxy-list" default:"proxy.lst" help:"File with list of domains to proxy through WireGuard(or specified interface)"`
-	BlockList string `arg:"--block-list" default:"blocks.lst" help:"File with list of domains to block completely"`
-	// IpList     string ``
-	Force      bool `arg:"-f,--force" help:"Force remove existing dnsr-wg interface and create new one"`
-	Silent     bool `arg:"-s,--silent" help:"Don't show when new routes are added"`
-	Verbose    bool `arg:"-v,--verbose" help:"Enable verbose output for all DNS-answers"`
-	Persistent bool `arg:"-p,--persistent" help:"Keep WireGuard interface (if created) and routes after exit"`
+	WGConfig   string `arg:"positional" help:"Path to WireGuard configuration file"`
+	Interface  string `arg:"-i,--interface" help:"Use existing WireGuard interface instead of creating new one from config"`
+	ProxyList  string `arg:"--proxy-list" default:"proxy.lst" help:"File with list of domains to proxy through WireGuard(or specified interface)"`
+	BlockList  string `arg:"--block-list" default:"blocks.lst" help:"File with list of domains to block completely"`
+	PresetIPs  string `arg:"--preset-ips" help:"File with IP addresses to proxy immediately, without waiting for DNS resolution"`
+	Force      bool   `arg:"-f,--force" help:"Force remove existing dnsr-wg interface and create new one"`
+	Silent     bool   `arg:"-s,--silent" help:"Don't show when new routes are added"`
+	Verbose    bool   `arg:"-v,--verbose" help:"Enable verbose output for all DNS-answers"`
+	Persistent bool   `arg:"-p,--persistent" help:"Keep WireGuard interface (if created) and routes after exit"`
 }
 
 func (Args) Version() string {

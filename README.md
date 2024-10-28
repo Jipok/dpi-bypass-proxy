@@ -51,11 +51,15 @@ Options:
   --interface, -i      Use existing network interface (OpenVPN, WireGuard, etc.)
   --proxy-list         Domains to route through specified interface [default: proxy.lst]
   --block-list         Domains to block [default: blocks.lst]
+  --preset-ips         File with IP addresses to proxy immediately, without waiting for DNS resolution
   --silent, -s         Don't show when new routes are added
   --verbose, -v        Enable verbose output
   --persistent, -p     Keep WireGuard interface (if created) and routes after exit
   --help, -h           Show this help message
   --version            Show version
+
+Multiple proxy/block/ips lists can be specified using semicolon (;)
+Example: proxy1.lst;proxy2.lst;proxy3.lst
 ```
 
 ## How It Works
