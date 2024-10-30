@@ -66,7 +66,7 @@ func setupRouting() {
 				log.Printf(yellow("Can't parse line in %s: ")+"%s", source, line)
 				continue
 			}
-			if addRoute(ip) {
+			if proxyIPset.Add(ip) && addRoute(ip) {
 				count++
 			} else {
 				log.Printf(yellow("  %s"), ip.String())
