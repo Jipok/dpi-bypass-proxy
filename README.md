@@ -51,33 +51,28 @@ uname -m    # or
 opkg print-architecture
 ```
 
-2. The DNSR requires the NFT queue kernel module. Install it using:
+2. Download the appropriate binary for your architecture from the [releases page](https://github.com/Jipok/dpi-bypass-proxy/releases/latest).
+
+3. The DNSR requires the NFT queue kernel module. Install it using:
 ```bash
 opkg update
 opkg install kmod-nft-queue
 ```
 
-3. Download the appropriate binary for your architecture from the [releases page](https://github.com/Jipok/dpi-bypass-proxy/releases/latest) and prepare domain lists as described in Quick Start section.
+4. Start dnsr
 
-4. After starting DNSR, you need to configure the firewall zones to properly handle traffic routing:
+5. Once DNSR creates its network interface, you'll need to configure a new firewall zone:
 
 <details>
 <summary>Click to see firewall zone configuration</summary>
 
-> [!TIP]
-> Configure these settings in LuCI under Network → Firewall → Zones
+![изображение](https://github.com/user-attachments/assets/c2ffd3f9-2091-4a36-9074-f16787acf657)
 
+![изображение](https://github.com/user-attachments/assets/20c97463-5fd4-4d13-9ced-61935715124a)
+
+![изображение](https://github.com/user-attachments/assets/86d58ed9-485f-43e7-9aa7-e4da8b783e8a)
 
 </details>
-
-### 5. Running on OpenWrt
-Run DNSR with your preferred configuration:
-```bash
-# Using WireGuard config
-./dnsr /etc/wireguard/wg0.conf
-
-# Or with existing interface
-./dnsr --interface wg0
 
 ### Command Line Options
 
