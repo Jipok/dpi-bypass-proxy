@@ -58,12 +58,25 @@ func setupNfqueue() {
 		return -1
 	})
 	if err != nil {
-		log.Fatal(err)
+		if useNFT {
+			log.Println(red("Do you have `nft-queue` kernel module?"))
+		}
+		log.Fatal("Can't register NFQUEUE func: ", err)
 	}
 
-	execCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-	execCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-	execCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	if useNFT {
+		execCommand("nft add table ip dnsr-nf")
+		execCommand("nft add chain ip dnsr-nf input { type filter hook input priority 0 \\; }")
+		execCommand("nft add chain ip dnsr-nf forward { type filter hook forward priority 0 \\; }")
+		execCommand("nft add chain ip dnsr-nf output { type filter hook output priority 0 \\; }")
+		execCommand("nft add rule ip dnsr-nf input udp sport 53 queue num ", strconv.Itoa(NFQUEUE))
+		execCommand("nft add rule ip dnsr-nf forward udp sport 53 queue num ", strconv.Itoa(NFQUEUE))
+		execCommand("nft add rule ip dnsr-nf output udp sport 53 queue num ", strconv.Itoa(NFQUEUE))
+	} else {
+		execCommand("iptables -I INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+		execCommand("iptables -I FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+		execCommand("iptables -I OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+	}
 	log.Printf(green("NFQUEUE `%d` successfully configured"), NFQUEUE)
 }
 
@@ -72,18 +85,32 @@ func removeNfqueue() {
 		nfCancel()
 		nf.Close()
 	}
-	output, err := exec.Command("sh", "-c", "iptables -L -n -v").Output()
-	if err == nil {
-		if strings.Contains(string(output), "NFQUEUE num "+strconv.Itoa(NFQUEUE)) {
-			execCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-			execCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-			execCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
-			log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
-			return
+	if !useNFT {
+		output, err := exec.Command("sh", "-c", "iptables -L -n -v").Output()
+		if err == nil {
+			if strings.Contains(string(output), "NFQUEUE num "+strconv.Itoa(NFQUEUE)) {
+				execCommand("iptables -D INPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+				execCommand("iptables -D FORWARD -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+				execCommand("iptables -D OUTPUT -p udp --sport 53 -j NFQUEUE --queue-num", strconv.Itoa(NFQUEUE))
+				log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
+				return
+			}
+			log.Printf("NFQUEUE `%d` not found, nothing cleanup", NFQUEUE)
+		} else {
+			log.Fatal(err)
 		}
-		log.Printf("NFQUEUE `%d` not found, nothing cleanup", NFQUEUE)
 	} else {
-		log.Fatal(err)
+		output, err := exec.Command("sh", "-c", "nft list tables").Output()
+		if err == nil {
+			if strings.Contains(string(output), "dnsr-nf") {
+				execCommand("nft delete table dnsr-nf")
+				log.Printf(green("NFQUEUE `%d` cleanup completed"), NFQUEUE)
+				return
+			}
+			log.Printf("NFQUEUE `%d` not found, nothing cleanup", NFQUEUE)
+		} else {
+			log.Fatal(err)
+		}
 	}
 }
 

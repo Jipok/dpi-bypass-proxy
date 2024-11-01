@@ -36,7 +36,10 @@ func (Args) Version() string {
 	return "dnsr 4.0.0"
 }
 
-var args Args
+var (
+	args   Args
+	useNFT bool
+)
 
 func main() {
 	arg.MustParse(&args)
@@ -79,6 +82,33 @@ func main() {
 		log.Fatal(red("Must be run as root"))
 	}
 
+	// Detect iptables/nftables
+	_, err := exec.LookPath("iptables")
+	iptablesAvailable := err == nil
+	_, err = exec.LookPath("nft")
+	nftablesAvailable := err == nil
+	//
+	iptablesActive := checkRules("iptables -L") || fileExists("/proc/net/ip_tables_names")
+	nftablesActive := checkRules("nft list ruleset") || fileExists("/proc/net/nf_tables")
+	//
+	if nftablesAvailable && nftablesActive {
+		if args.Verbose {
+			log.Println("Detected nftables")
+		}
+		useNFT = true
+	} else if iptablesAvailable && iptablesActive {
+		if args.Verbose {
+			log.Println("Detected iptables")
+		}
+	} else if nftablesAvailable {
+		log.Println(yellow("Warning! Detected nftables, but may not be active"))
+		useNFT = true
+	} else if iptablesAvailable {
+		log.Println(yellow("Warning! Detected iptables, but may not be active"))
+	} else {
+		log.Fatal(red("Neither iptables nor nftables were found."))
+	}
+
 	if err := syscall.Setgid(GID); err != nil {
 		log.Fatalf(red("Can't change GID: %v\n"), err)
 	}
@@ -112,7 +142,6 @@ func main() {
 	}
 
 	// Check for existing interface
-	var err error
 	link, err = netlink.LinkByName(INTERFACE_NAME)
 	if err == nil && args.Interface != INTERFACE_NAME {
 		log.Print(yellow("An existing `dnsr-wg` interface was found."))
@@ -141,7 +170,7 @@ func main() {
 		if err != nil {
 			log.Fatalf(red("Error:")+" getting `%s` interface: %v", args.Interface, err)
 		}
-		execCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", args.Interface))
+		setUpMasquerade(args.Interface)
 		log.Printf(green("Using `%s` interface"), args.Interface)
 	}
 
@@ -156,7 +185,12 @@ func main() {
 	log.Println("Shutting down...")
 
 	if args.Interface != "" {
-		execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", args.Interface))
+		// Remove MASQUERADE rule
+		if useNFT {
+			execCommand("nft delete table ip dnsr-nat")
+		} else {
+			execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", args.Interface))
+		}
 	}
 }
 
@@ -191,4 +225,9 @@ func execCommand(cmdargs ...string) {
 		}
 		log.Fatalf(red("%v")+", output: %s \n", err, output)
 	}
+}
+
+func checkRules(cmd string) bool {
+	output, err := exec.Command("sh", "-c", cmd).Output()
+	return err == nil && len(output) > 0
 }

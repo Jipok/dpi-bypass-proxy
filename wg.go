@@ -47,7 +47,12 @@ func setupWireguard() {
 
 func removeWireguard(force bool) {
 	if force || !args.Persistent {
-		execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", INTERFACE_NAME))
+		// Remove MASQUERADE rule
+		if useNFT {
+			execCommand("nft delete table ip dnsr-nat")
+		} else {
+			execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -o %s -j MASQUERADE", INTERFACE_NAME))
+		}
 		err := netlink.LinkDel(link)
 		if err != nil {
 			log.Fatalf(red("Error:")+" deleting `%s` interface: %v", args.Interface, err)
@@ -278,7 +283,7 @@ func setupInterface(config *WireguardConfig) error {
 	}
 
 	// Add MASQUERADE rule
-	execCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", INTERFACE_NAME))
+	setUpMasquerade(INTERFACE_NAME)
 
 	// Display final configuration
 	if args.Verbose {
@@ -317,4 +322,17 @@ func isModuleLoaded(moduleName string) bool {
 	}
 
 	return false
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+func setUpMasquerade(name string) {
+	if useNFT {
+		execCommand("nft add table dnsr-nat")
+		execCommand("nft add chain ip dnsr-nat postrouting { type nat hook postrouting priority 100 \\; }")
+		execCommand("nft add table dnsr-nat")
+		execCommand("nft add rule ip dnsr-nat postrouting oifname", name, "masquerade")
+	} else {
+		execCommand(fmt.Sprintf("iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", name))
+	}
 }
