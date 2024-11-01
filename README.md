@@ -43,6 +43,42 @@ A simple yet powerful tool that automatically routes your traffic through VPN fo
 
 That's it! DNSR automatically handles everything else.
 
+## OpenWrt Setup Guide
+
+1. First, check your router's architecture to download the correct binary:
+```bash
+uname -m    # or
+opkg print-architecture
+```
+
+2. The DNSR requires the NFT queue kernel module. Install it using:
+```bash
+opkg update
+opkg install kmod-nft-queue
+```
+
+3. Download the appropriate binary for your architecture from the [releases page](https://github.com/Jipok/dpi-bypass-proxy/releases/latest) and prepare domain lists as described in Quick Start section.
+
+4. After starting DNSR, you need to configure the firewall zones to properly handle traffic routing:
+
+<details>
+<summary>Click to see firewall zone configuration</summary>
+
+> [!TIP]
+> Configure these settings in LuCI under Network → Firewall → Zones
+
+
+</details>
+
+### 5. Running on OpenWrt
+Run DNSR with your preferred configuration:
+```bash
+# Using WireGuard config
+./dnsr /etc/wireguard/wg0.conf
+
+# Or with existing interface
+./dnsr --interface wg0
+
 ### Command Line Options
 
 ```
